@@ -1,6 +1,6 @@
 # 🏔️ Aosta Valley Refuges & Bivouacs Explorer
 
-**[🚀 CLICCA QUI PER APRIRE LA WEB APP](https://INSERISCI-QUI-IL-TUO-LINK-STREAMLIT)**
+**[🚀 CLICCA QUI PER APRIRE LA WEB APP](https://bivacchi-rifugi-vda.streamlit.app/)**
 
 A web-based GIS application built with Python and Streamlit to explore, map, and track visits to mountain refuges and bivouacs in the Aosta Valley (Italy).
 
