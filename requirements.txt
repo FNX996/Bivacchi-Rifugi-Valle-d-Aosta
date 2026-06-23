@@ -2,3 +2,4 @@ streamlit
 geopandas
 folium
 streamlit-folium
+supabase
