@@ -11,6 +11,7 @@ from supabase import create_client, Client
 # ==========================================
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
 
+# Forza la visualizzazione corretta degli elementi cartografici in Streamlit
 st.markdown("""
     <style>
         iframe { opacity: 1 !important; filter: none !important; transition: none !important; }
@@ -39,6 +40,7 @@ except Exception as e:
 # FUNZIONI DI LETTURA DATABASE E CREDENZIALI
 # ==========================================
 def fetch_profili_esistenti():
+    """Estrae la lista dei profili utente univoci registrati nel database."""
     try:
         response = supabase.table("utenti_credenziali").select("utente").execute()
         profili = [row['utente'] for row in response.data if row.get('utente')]
@@ -63,6 +65,7 @@ def registra_nuovo_utente(utente, password):
         return False
 
 def fetch_stati_dal_db(utente):
+    """Recupera la mappa degli stati per uno specifico utente."""
     try:
         response = supabase.table("stato_visite").select("*").eq("utente", utente).execute()
         return {row['nome_struttura']: row['stato'] for row in response.data}
@@ -71,6 +74,7 @@ def fetch_stati_dal_db(utente):
         return {}
 
 def get_valore_colonna(row, nome_colonna_base, default="N/D"):
+    """Funzione di controllo per estrarre i dati dalle colonne del GeoJSON senza errori di case-sensitivity."""
     for col in row.index:
         if col.lower() == nome_colonna_base.lower():
             valore = row[col]
@@ -78,6 +82,7 @@ def get_valore_colonna(row, nome_colonna_base, default="N/D"):
     return default
 
 def colonne_reali(df, colonne_cercate):
+    """Mappa le colonne richieste con quelle realmente esistenti nel dataframe (case-insensitive)."""
     df_cols_lower = {c.lower(): c for c in df.columns}
     return [df_cols_lower[c.lower()] for c in colonne_cercate if c.lower() in df_cols_lower]
 
@@ -135,7 +140,7 @@ def autosave_tabella_bivacchi():
                 nuovo_stato = changes["Stato_Visita"]
                 nome_struttura = df.loc[row_idx, col_nome]
                 
-                st.session_state.bivacchi.loc[row_idx, "Stato_Visita"] = nuevo_stato
+                st.session_state.bivacchi.loc[row_idx, "Stato_Visita"] = nuovo_stato
                 records_upsert.append({
                     "nome_struttura": nome_struttura,
                     "stato": nuovo_stato,
@@ -289,7 +294,6 @@ mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['Stato_Visita'].i
 
 st.sidebar.markdown("<br><br>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
-# MODIFICA: Aggiornato testo informativo con versione 2.0 beta
 st.sidebar.markdown("""
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
     <b>App Rifugi & Bivacchi VdA</b><br>
@@ -341,6 +345,7 @@ def crea_popup(row):
     </div>
     """
 
+# Ciclo di inserimento dei marker cartografici
 for _, row in mappa_bivacchi.iterrows():
     folium.Marker(
         location=[row.geometry.y, row.geometry.x], 
@@ -356,6 +361,42 @@ for _, row in mappa_rifugi.iterrows():
         tooltip=get_valore_colonna(row, "Name_it"), 
         icon=folium.DivIcon(html=f"<div style='background-color: {get_marker_color(row['Stato_Visita'])}; width: 30px; height: 30px; border-radius: 6px; border: 2px solid white; display: flex; align-items: center; justify-content: center; box-shadow: 1px 1px 4px rgba(0,0,0,0.3); font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))
     ).add_to(m)
+
+# ==========================================
+# INIEZIONE LEGENDA INTERNA ALLA MAPPA (NUOVO)
+# ==========================================
+legend_html = """
+<div style="position: fixed; 
+            bottom: 20px; left: 20px; width: 145px; z-index:9999; 
+            background-color: rgba(255, 255, 255, 0.85); 
+            padding: 10px; border-radius: 8px; 
+            box-shadow: 0 0 10px rgba(0,0,0,0.2); 
+            font-family: sans-serif; font-size: 12px; color: #333; line-height: 1.5;">
+    <b style="font-size: 13px; display: block; margin-bottom: 5px;">🗺️ Legenda</b>
+    <div style="margin-bottom: 8px;">
+        <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tipologia</span>
+        <div style="display: flex; align-items: center; margin-top: 2px;">
+            <div style="background-color: #999; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 6px; font-size: 9px; color: white;">⛺</div> Bivacco
+        </div>
+        <div style="display: flex; align-items: center; margin-top: 2px;">
+            <div style="background-color: #999; width: 16px; height: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; margin-right: 6px; font-size: 9px; color: white;">🏠</div> Rifugio
+        </div>
+    </div>
+    <div>
+        <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Stato Visita</span>
+        <div style="display: flex; align-items: center; margin-top: 2px;">
+            <span style="background: #28a745; width: 11px; height: 11px; border-radius: 50%; display: inline-block; margin-right: 8px; border: 1px solid white;"></span> Visitato
+        </div>
+        <div style="display: flex; align-items: center; margin-top: 2px;">
+            <span style="background: #ffc107; width: 11px; height: 11px; border-radius: 50%; display: inline-block; margin-right: 8px; border: 1px solid white;"></span> Pianificato
+        </div>
+        <div style="display: flex; align-items: center; margin-top: 2px;">
+            <span style="background: #dc3545; width: 11px; height: 11px; border-radius: 50%; display: inline-block; margin-right: 8px; border: 1px solid white;"></span> Non visitato
+        </div>
+    </div>
+</div>
+"""
+m.get_root().html.add_child(folium.Element(legend_html))
 
 folium.LayerControl(position='topright').add_to(m)
 
