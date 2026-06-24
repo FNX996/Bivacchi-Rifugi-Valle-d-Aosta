@@ -4,3 +4,6 @@ folium
 streamlit-folium
 supabase
 requests
+networkx
+scipy
+shapely
