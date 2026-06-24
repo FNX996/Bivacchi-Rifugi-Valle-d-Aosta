@@ -5,6 +5,10 @@ from folium import plugins
 from streamlit_folium import st_folium
 import os
 import requests
+import math
+import networkx as nx
+from scipy.spatial import cKDTree
+import rasterio
 from supabase import create_client, Client
 
 # ==========================================
@@ -38,14 +42,13 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# FUNZIONI DI SERVIZIO ED ESPORTAZIONE
+# FUNZIONI DI SERVIZIO E ANALISI DTM / ROUTING
 # ==========================================
 def fetch_profili_esistenti():
     try:
         response = supabase.table("utenti_credenziali").select("utente").execute()
         return sorted([row['utente'] for row in response.data if row.get('utente')])
-    except:
-        return []
+    except: return []
 
 def verifica_password(utente, password_inserita):
     try:
@@ -77,32 +80,8 @@ def colonne_reali(df, colonne_cercate):
     df_cols_lower = {c.lower(): c for c in df.columns}
     return [df_cols_lower[c.lower()] for c in colonne_cercate if c.lower() in df_cols_lower]
 
-def get_elevation_api(lat, lon):
-    try:
-        r = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}")
-        if r.status_code == 200: return r.json()['elevation'][0]
-    except: pass
-    return 0
-
-def calcola_percorso_osrm_multi(punti_coords):
-    stringa_locs = ";".join([f"{lon},{lat}" for lat, lon in punti_coords])
-    url = f"http://router.project-osrm.org/route/v1/foot/{stringa_locs}?overview=full&geometries=geojson"
-    try:
-        r = requests.get(url)
-        if r.status_code == 200:
-            data = r.json()
-            if data['code'] == 'Ok': return data['routes'][0]
-    except: pass
-    return None
-
 def genera_gpx(coordinate_geometria, nome_itinerario="Itinerario VdA"):
-    gpx = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<gpx version="1.1" creator="VdA_Explorer" xmlns="http://www.topografix.com/GPX/1/1">',
-        '  <trk>',
-        f'    <name>{nome_itinerario}</name>',
-        '    <trkseg>'
-    ]
+    gpx = ['<?xml version="1.0" encoding="UTF-8"?>', '<gpx version="1.1" creator="VdA_Explorer" xmlns="http://www.topografix.com/GPX/1/1">', '  <trk>', f'    <name>{nome_itinerario}</name>', '    <trkseg>']
     for lon, lat in coordinate_geometria:
         gpx.append(f'      <trkpt lat="{lat}" lon="{lon}"></trkpt>')
     gpx.extend(['    </trkseg>', '  </trk>', '</gpx>'])
@@ -118,8 +97,96 @@ def genera_google_maps_url(punti_coords):
         url += f"&waypoints={tappe}"
     return url
 
+def calcola_profilo_dtm(traccia_coordinate, dtm_path):
+    """Estrae le quote reali dal file GeoTIFF locale calcolando D+ e D- cumulati."""
+    try:
+        with rasterio.open(dtm_path) as dataset:
+            valori_quota = [val[0] for val in dataset.sample(traccia_coordinate)]
+                
+        disl_pos = 0
+        disl_neg = 0
+        
+        for i in range(len(valori_quota) - 1):
+            diff = valori_quota[i+1] - valori_quota[i]
+            if diff > 0:
+                disl_pos += diff
+            else:
+                disl_neg += abs(diff)
+                
+        return valori_quota, int(disl_pos), int(disl_neg)
+    except:
+        return [], 0, 0
+
+@st.cache_resource(show_spinner=False)
+def prepara_motore_routing(_gdf):
+    """Costruisce il grafo ed esegue uno snapping spaziale per connettere reti interrotte."""
+    def haversine(lon1, lat1, lon2, lat2):
+        R = 6371.0
+        dLat, dLon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+        a = math.sin(dLat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon/2)**2
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+    G = nx.Graph()
+    for _, row in _gdf.iterrows():
+        geom = row.geometry
+        if geom is None: continue
+        lines = [geom] if geom.geom_type == 'LineString' else geom.geoms if geom.geom_type == 'MultiLineString' else []
+        for line in lines:
+            coords = list(line.coords)
+            for i in range(len(coords)-1):
+                p1, p2 = coords[i], coords[i+1]
+                dist = haversine(p1[0], p1[1], p2[0], p2[1])
+                G.add_edge(p1, p2, weight=dist)
+    
+    nodi_lista = list(G.nodes())
+    if not nodi_lista: return None, None, None
+    albero = cKDTree(nodi_lista)
+    
+    # SNAPPING TOPOLOGICO: Unisce nodi separati da buchi fino a 30 metri (~0.00027 gradi)
+    tolleranza_gradi = 0.00027 
+    pairs = albero.query_pairs(r=tolleranza_gradi)
+    for i, j in pairs:
+        n1, n2 = nodi_lista[i], nodi_lista[j]
+        if not G.has_edge(n1, n2):
+            dist = haversine(n1[0], n1[1], n2[0], n2[1])
+            G.add_edge(n1, n2, weight=dist)
+            
+    return G, nodi_lista, albero
+
+def trova_nodo_vicino(albero, nodi, lon, lat):
+    _, idx = albero.query((lon, lat))
+    return nodi[idx]
+
+def calcola_percorso_locale(G, albero, nodi, punti_coords):
+    """Sviluppa l'itinerario connettendo i nodi grafici estratti dal GeoJSON."""
+    try:
+        traccia_totale = []
+        distanza_km = 0.0
+        
+        for i in range(len(punti_coords)-1):
+            p1_lon, p1_lat = punti_coords[i][1], punti_coords[i][0]
+            p2_lon, p2_lat = punti_coords[i+1][1], punti_coords[i+1][0]
+            
+            nodo1 = trova_nodo_vicino(albero, nodi, p1_lon, p1_lat)
+            nodo2 = trova_nodo_vicino(albero, nodi, p2_lon, p2_lat)
+            
+            path = nx.shortest_path(G, source=nodo1, target=nodo2, weight='weight')
+            
+            for j in range(len(path)-1):
+                distanza_km += G[path[j]][path[j+1]]['weight']
+                
+            if i == 0: traccia_totale.extend(path)
+            else: traccia_totale.extend(path[1:])
+        
+        return {
+            'geometry': {'type': 'LineString', 'coordinates': traccia_totale},
+            'distance': distanza_km * 1000
+        }
+    except nx.NetworkXNoPath:
+        return None
+
 # ==========================================
-# CALLBACKS DI PROFILO
+# CALLBACKS DI PROFILO E AGGIORNAMENTO CLOUD
 # ==========================================
 def handle_profile_change():
     scelta = st.session_state.scelta_profilo_widget
@@ -262,7 +329,7 @@ if not st.session_state.get("profilo_attivo") or not st.session_state.autenticat
     st.sidebar.markdown("""
     <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
         <b>App Rifugi & Bivacchi VdA</b><br>
-        Versione: 3.0 beta<br>
+        Versione: 3.0 beta (Local Routing)<br>
         Autore: Nori Fabrizio
     </div>
     """, unsafe_allow_html=True)
@@ -270,7 +337,7 @@ if not st.session_state.get("profilo_attivo") or not st.session_state.autenticat
     st.stop()
 
 # ==========================================
-# INIZIALIZZAZIONE STRUTTURA DATI GEOGRAFICI
+# INIZIALIZZAZIONE STRUTTURA DATI GEOGRAFICI E GRAFO
 # ==========================================
 if "dati_caricati" not in st.session_state:
     stati_cloud = fetch_stati_dal_db(st.session_state.profilo_attivo)
@@ -289,6 +356,12 @@ if "dati_caricati" not in st.session_state:
         st.error("File cartografici GeoJSON non individuati nel repository sorgente!")
         st.stop()
 
+# INIZIALIZZAZIONE COMPILATORE GRAFO ED ALBERO SPAZIALE
+grafo_motore, nodi_motore, albero_motore = None, None, None
+if st.session_state.sentieri is not None:
+    with st.spinner("Compilazione e ottimizzazione rete sentieristica in corso..."):
+        grafo_motore, nodi_motore, albero_motore = prepara_motore_routing(st.session_state.sentieri)
+
 dizionario_strutture = {}
 for df in [st.session_state.bivacchi, st.session_state.rifugi]:
     for _, row in df.iterrows():
@@ -301,13 +374,12 @@ stati_selezionati = st.sidebar.multiselect("Filtra Mappa per Stato:", options=st
 mappa_bivacchi = st.session_state.bivacchi[st.session_state.bivacchi['Stato_Visita'].isin(stati_selezionati)]
 mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['Stato_Visita'].isin(stati_selezionati)]
 
-# Sezione info in basso a sinistra della barra laterale per utenti loggati
 st.sidebar.markdown("<br><br>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
     <b>App Rifugi & Bivacchi VdA</b><br>
-    Versione: 3.0 beta<br>
+    Versione: 3.0 beta (Local Routing)<br>
     Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
@@ -316,7 +388,7 @@ st.sidebar.markdown("""
 # PANNELLO ITINERARIO SEMPRE VISIBILE
 # ==========================================
 with st.container(border=True):
-    st.subheader("🧭 Pianificatore Itinerario")
+    st.subheader("🧭 Pianificatore Itinerario sul GeoJSON")
     
     txt_partenza = st.session_state.itinerario_struttura["partenza"][0] if st.session_state.itinerario_struttura["partenza"] else "Non impostata"
     txt_tappe = " ➔ ".join([t[0] for t in st.session_state.itinerario_struttura["tappe"]]) if st.session_state.itinerario_struttura["tappe"] else "Nessuna"
@@ -333,17 +405,27 @@ with st.container(border=True):
     with col_calc:
         if st.button("🔄 Calcola e Genera Tracciato Lineare", type="primary", use_container_width=True):
             if len(punti_itinerario_completo) >= 2:
-                coords_solo = [(p[1], p[2]) for p in punti_itinerario_completo]
-                with st.spinner("Interrogazione rete OSRM..."):
-                    rotta = calcola_percorso_osrm_multi(coords_solo)
-                    if rotta:
-                        st.session_state.itinerario_attivo = rotta
-                        distanza_km = round(rotta['distance'] / 1000, 2)
-                        quota_p = punti_itinerario_completo[0][3]
-                        quota_a = punti_itinerario_completo[-1][3]
-                        dislivello_netto = round(quota_a - quota_p)
-                        st.session_state.itinerario_metadati = {"dist": distanza_km, "disl": dislivello_netto}
-                    else: st.error("Impossibile connettere i punti scelti tramite sentiero.")
+                if grafo_motore:
+                    coords_solo = [(p[1], p[2]) for p in punti_itinerario_completo]
+                    with st.spinner("Calcolo tracciato e campionamento DTM locale..."):
+                        rotta = calcola_percorso_locale(grafo_motore, albero_motore, nodi_motore, coords_solo)
+                        
+                        if rotta:
+                            st.session_state.itinerario_attivo = rotta
+                            distanza_km = round(rotta['distance'] / 1000, 2)
+                            
+                            dtm_selezionato = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else "DTM_vda" if os.path.exists("DTM_vda") else None
+                            
+                            if dtm_selezionato:
+                                coords_traccia = rotta['geometry']['coordinates']
+                                _, d_pos, d_neg = calcola_profilo_dtm(coords_traccia, dtm_selezionato)
+                            else:
+                                d_pos, d_neg = 0, 0
+                                
+                            st.session_state.itinerario_metadati = {"dist": distanza_km, "d_pos": d_pos, "d_neg": d_neg}
+                        else:
+                            st.error("❌ Rete interrotta: Nemmeno lo snapping a 30 metri è riuscito a congiungere le tracce scelte.")
+                else: st.error("Rete escursionistica GeoJSON mancante.")
             else: st.warning("Inserisci almeno Partenza e Arrivo cliccando sulla mappa per calcolare.")
     with col_reset:
         if st.button("🗑️ Svuota Tutto l'Itinerario", use_container_width=True):
@@ -354,7 +436,7 @@ with st.container(border=True):
 
     if st.session_state.get("itinerario_attivo") and st.session_state.get("itinerario_metadati"):
         meta = st.session_state.itinerario_metadati
-        st.info(f"📊 **Statistiche dell'Itinerario:** Distanza Totale: **{meta['dist']} km** | Dislivello Netto: **{meta['disl']} metri**")
+        st.info(f"📊 **Statistiche dell'Itinerario:** Distanza: **{meta['dist']} km** | Sviluppo: **D+ {meta['d_pos']} m** / **D- {meta['d_neg']} m**")
         
         coords_itinerario = st.session_state.itinerario_attivo['geometry']['coordinates']
         gpx_data = genera_gpx(coords_itinerario)
@@ -368,7 +450,7 @@ with st.container(border=True):
         with c2:
             st.link_button("🗺️ Apri in Google Maps", url=maps_url, use_container_width=True)
         with c3:
-            st.caption("ℹ *Il file .GPX scaricato può essere importato direttamente anche in Google Earth Pro per lo studio del terreno 3D.*")
+            st.caption("ℹ️ *Nota: Il profilo altimetrico è estratto direttamente dal file raster DTM locale presente nel progetto.*")
 
 # ==========================================
 # GENERAZIONE INTERFACCIA MAPPA (FOLIUM)
@@ -410,6 +492,16 @@ def crea_popup(row):
 
 if st.session_state.get("sentieri") is not None:
     fg_sentieri = folium.FeatureGroup(name="🥾 Rete Sentieristica", show=True)
+    
+    campi_tooltip = []
+    nomi_alias = []
+    if 'name' in st.session_state.sentieri.columns:
+        campi_tooltip.append('name')
+        nomi_alias.append('Nome:')
+    if 'ref' in st.session_state.sentieri.columns:
+        campi_tooltip.append('ref')
+        nomi_alias.append('N°:')
+
     def stile_sentiero(feature):
         fclass = feature['properties'].get('fclass', 'path')
         if fclass == 'footway': colore = '#2ca02c'
@@ -417,7 +509,12 @@ if st.session_state.get("sentieri") is not None:
         else: colore = '#e65c00'
         return {'color': colore, 'weight': 2.2, 'dashArray': '6, 6', 'opacity': 0.85}
 
-    folium.GeoJson(st.session_state.sentieri, style_function=stile_sentiero, highlight_function=lambda x: {'color': '#ff3300', 'weight': 4.0}, tooltip=folium.GeoJsonTooltip(fields=['name', 'ref'], aliases=['Nome:', 'N°:']) if 'name' in st.session_state.sentieri.columns else None).add_to(fg_sentieri)
+    folium.GeoJson(
+        st.session_state.sentieri, 
+        style_function=stile_sentiero, 
+        highlight_function=lambda x: {'color': '#ff3300', 'weight': 4.0}, 
+        tooltip=folium.GeoJsonTooltip(fields=campi_tooltip, aliases=nomi_alias) if campi_tooltip else None
+    ).add_to(fg_sentieri)
     fg_sentieri.add_to(m)
 
 if st.session_state.get("itinerario_attivo"):
@@ -425,7 +522,6 @@ if st.session_state.get("itinerario_attivo"):
     folium.GeoJson(st.session_state.itinerario_attivo['geometry'], style_function=lambda x: {'color': '#0055ff', 'weight': 5, 'opacity': 0.9}).add_to(fg_itinerario)
     fg_itinerario.add_to(m)
 
-# Indicatori di rotta in formato GIGANTE con DivIcon (45x45 px)
 p_node = st.session_state.itinerario_struttura.get("partenza")
 if p_node:
     icon_html_p = "<div style='background-color: #0055ff; width: 45px; height: 45px; border-radius: 50%; border: 3px solid white; display: flex; align-items: center; justify-content: center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size: 22px; color: white;'>🛫</div>"
@@ -440,14 +536,12 @@ if a_node:
     icon_html_a = "<div style='background-color: #ff0000; width: 45px; height: 45px; border-radius: 50%; border: 3px solid white; display: flex; align-items: center; justify-content: center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size: 22px; color: white;'>🛬</div>"
     folium.Marker(location=[a_node[1], a_node[2]], tooltip=f"DESTINAZIONE: {a_node[0]}", icon=folium.DivIcon(html=icon_html_a, icon_size=(45, 45), icon_anchor=(22, 22))).add_to(m)
 
-# Disegno dei marker per Bivacchi e Rifugi
 for _, row in mappa_bivacchi.iterrows():
     folium.Marker(location=[row.geometry.y, row.geometry.x], popup=folium.Popup(crea_popup(row), max_width=450), tooltip=get_valore_colonna(row, "Name_it"), icon=folium.DivIcon(html=f"<div style='background-color: {get_marker_color(row['Stato_Visita'])}; width: 30px; height: 30px; border-radius: 50%; border: 2px solid white; display: flex; align-items: center; justify-content: center; box-shadow: 1px 1px 4px rgba(0,0,0,0.3); font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
 for _, row in mappa_rifugi.iterrows():
     folium.Marker(location=[row.geometry.y, row.geometry.x], popup=folium.Popup(crea_popup(row), max_width=450), tooltip=get_valore_colonna(row, "Name_it"), icon=folium.DivIcon(html=f"<div style='background-color: {get_marker_color(row['Stato_Visita'])}; width: 30px; height: 30px; border-radius: 6px; border: 2px solid white; display: flex; align-items: center; justify-content: center; box-shadow: 1px 1px 4px rgba(0,0,0,0.3); font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
-# Iniezione Legenda HTML
 legend_html = """
 <div style="position: fixed; bottom: 20px; left: 20px; width: 180px; z-index:9999; background-color: rgba(255, 255, 255, 0.90); padding: 12px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.2); font-family: sans-serif; font-size: 11px; color: #333; line-height: 1.4;">
     <b style="font-size: 12px; display: block; margin-bottom: 5px;">🗺️ Legenda</b>
@@ -475,7 +569,6 @@ folium.LayerControl(position='topright').add_to(m)
 
 st.markdown(f"Mappa attiva: **{st.session_state.profilo_attivo}**")
 
-# st_folium con chiave statica per bloccare i reset di iFrame
 map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
 
 # ==========================================
@@ -494,7 +587,15 @@ elif punto_mappa_cliccato:
     lat_nodo = punto_mappa_cliccato['lat']
     lon_nodo = punto_mappa_cliccato['lng']
     nome_nodo = f"Punto Libero ({round(lat_nodo,4)}, {round(lon_nodo,4)})"
-    quota_nodo = get_elevation_api(lat_nodo, lon_nodo)
+    
+    dtm_selezionato = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else "DTM_vda" if os.path.exists("DTM_vda") else None
+    if dtm_selezionato:
+        try:
+            with rasterio.open(dtm_selezionato) as dataset:
+                quota_nodo = [v[0] for v in dataset.sample([(lon_nodo, lat_nodo)])][0]
+        except: quota_nodo = 0
+    else:
+        quota_nodo = 0
 
 if nome_nodo and lat_nodo and lon_nodo:
     st.markdown(f"### 📍 Elemento selezionato sulla mappa: `{nome_nodo}` (Quota: {round(quota_nodo)} m)")
