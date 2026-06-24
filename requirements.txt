@@ -3,8 +3,4 @@ geopandas
 folium
 streamlit-folium
 supabase
-<<<<<<< HEAD
 requests
-=======
-requests
->>>>>>> 2328b2a7fb6bde40fa07809ced7c12ec74d19b10
