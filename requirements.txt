@@ -8,3 +8,5 @@ networkx
 scipy
 shapely
 rasterio
+gpxpy
+plotly
