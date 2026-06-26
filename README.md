@@ -1,49 +1,74 @@
-# 🏔️ Aosta Valley Refuges & Bivouacs Explorer
+Esplorazione e Pianificazione VdA 🏔️
 
-**[🚀 CLICCA QUI PER APRIRE LA WEB APP](https://bivacchi-rifugi-vda.streamlit.app/)**
+Una WebGIS App avanzata per l'esplorazione, la pianificazione degli itinerari e la gestione delle visite ai Rifugi e Bivacchi della Valle d'Aosta.
 
-A web-based GIS application built with Python and Streamlit to explore, map, and track visits to mountain refuges and bivouacs in the Aosta Valley (Italy).
+Progettata per gli amanti del trekking, l'applicazione unisce cartografia interattiva, calcolo topologico dei percorsi offline e analisi altimetrica ad alta precisione.
 
-The app features an interactive map and a cloud-synchronized database to persistently save the visitation status of each location.
+🌟 Funzionalità Principali (Versione 4.0)
 
-## ✨ Key Features
-* **Interactive Mapping:** Full-screen map powered by Folium with toggleable base layers (Esri Satellite and OSM Topographic).
-* **Smart Popups:** Click on any location to view elevation, access difficulty, external links, and direct [Meteoblue](https://www.meteoblue.com) weather forecasts.
-* **Cloud Database:** Real-time synchronization with **Supabase** (PostgreSQL) to securely save and load the status of each structure (`Visited`, `Planned`, `Not Visited`).
-* **In-App Editing:** Update the status of a location directly from the map popup or through the global interactive data tables.
-* **Data Filtering:** Quickly filter the map markers based on your visitation status.
+Mappa Interattiva: Visualizzazione dinamica di rifugi, bivacchi e rete sentieristica tramite Folium e OpenStreetMap.
 
-## 🛠️ Technologies Used
-* **Python 3**
-* **Streamlit** (Web framework & UI)
-* **GeoPandas** (Geospatial data processing)
-* **Folium & Streamlit-Folium** (Interactive maps)
-* **Supabase** (Cloud PostgreSQL database)
+Gestione Profili Cloud: Sistema di autenticazione e salvataggio in cloud (tramite Supabase) per tenere traccia dello stato di visita di ogni struttura (Visitato, Pianificato, Non Visitato).
 
-## 🚀 Local Setup & Installation
+Motore di Routing Offline (A):* Calcolo istantaneo degli itinerari escursionistici basato su un file GeoJSON locale. L'algoritmo utilizza lo snapping topologico (30 metri) per riparare in automatico le interruzioni di rete.
 
-1. Clone the repository:
-   ```bash
-   git clone [https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git)
-   cd YOUR_REPOSITORY_NAME
+Analisi Altimetrica DTM: Estrazione precisa delle quote da un Digital Terrain Model (raster .tif) per il calcolo del dislivello positivo (D+) e negativo (D-).
 
-    Install the required dependencies:
-    Bash
+Grafici e Stime: Generazione di profili altimetrici interattivi tramite Plotly e stima dei tempi di percorrenza tramite la Formula CAI.
 
-    pip install -r requirements.txt
+Importazione GPX: Modulo integrato per caricare file .gpx personali, analizzarne le quote, visualizzarne il profilo altimetrico ed esplorarli sulla mappa.
 
-    Set up your Supabase connection. Create a .streamlit/secrets.toml file in the root directory and add your credentials:
-    Ini, TOML
+Meteo Live: Integrazione con le API gratuite di Open-Meteo per fornire previsioni a 3 giorni sul punto della mappa cliccato.
 
-    [supabase]
-    url = "[https://your-project.supabase.co](https://your-project.supabase.co)"
-    key = "your-anon-public-key"
+Esportazione: Possibilità di scaricare le rotte calcolate in formato .gpx o di aprirle direttamente in Google Maps.
 
-    Run the application:
-    Bash
+🛠️ Requisiti di Sistema e Installazione Locale
 
-    streamlit run app.py
+Per far girare l'applicazione in locale, assicurati di avere Python installato e procedi con i seguenti passaggi.
 
-👤 Author
+1. Clona il repository
 
-Fabrizio Nori - Version 2.1_beta
+git clone https://github.com/FNX996/Bivacchi-Rifugi-Valle-d-Aosta.git
+cd Bivacchi-Rifugi-Valle-d-Aosta
+
+
+2. Installa le librerie
+
+Installa le dipendenze elencate nel file requirements.txt:
+
+pip install -r requirements.txt
+
+
+Le librerie principali includono: streamlit, geopandas, folium, networkx, scipy, rasterio, gpxpy, plotly, supabase.
+
+3. File Dati (Non inclusi in repo se superiori a 100MB)
+
+Assicurati che i seguenti file siano presenti nella cartella principale dell'app:
+
+bivacchi_vda.geojson
+
+rifugi_vda.geojson
+
+sentieri_vda_ottimizzati.geojson
+
+DTM_vda.tif (Modello altimetrico raster per il calcolo dei dislivelli)
+
+4. Configurazione Database (Supabase)
+
+Crea una cartella nascosta .streamlit nella root del progetto, crea un file secrets.toml all'interno e inserisci le tue credenziali Supabase:
+
+[supabase]
+url = "IL_TUO_URL_SUPABASE"
+key = "LA_TUA_CHIAVE_ANON_PUBLIC"
+
+
+5. Avvio dell'App
+
+Avvia il server locale di Streamlit:
+
+streamlit run app.py
+
+
+👨‍💻 Autore
+
+Nori Fabrizio (@FNX996) - Sviluppo App, Analisi Dati e Integrazione GIS.
