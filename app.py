@@ -267,6 +267,7 @@ st.sidebar.markdown("""
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
         <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato.</li>
         <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
+        <li><b>Registri:</b> Gestisci e riepiloga gli stati delle strutture visitate.</li>
         <li><b>GPX:</b> Importa, analizza e visualizza le tue tracce.</li>
     </ul>
 </div>
@@ -274,7 +275,6 @@ st.sidebar.markdown("""
     <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.1 beta<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
-
 
 # ==========================================
 # CARICAMENTO DATI ULTRA-VELOCE
@@ -470,10 +470,10 @@ with tab_mappa:
     for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
-    # FIX LEGENDA: Utilizzo di Branca MacroElement per fissarla saldamente all'iframe e colori forzati su #333 per evitare che scompaiano
+    # FIX LEGENDA: Utilizzo di Branca MacroElement per fissarla saldamente all'iframe e colori forzati su #333
     legend_template = """
     {% macro html(this, kwargs) %}
-    <div style="position: fixed; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto; color: #333;">
+    <div style="position: absolute; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto; color: #333;">
         <b style="font-size: 14px; display: block; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; color: #000;">🗺️ Legenda</b>
         <div style="margin-bottom: 8px;">
             <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tracciati</span>
@@ -498,7 +498,7 @@ with tab_mappa:
     macro = MacroElement()
     macro._template = Template(legend_template)
     m.get_root().add_child(macro)
-    
+
     folium.LayerControl(position='topright').add_to(m)
 
     map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
@@ -542,10 +542,42 @@ with tab_mappa:
                 else: st.caption("Meteo non disponibile.")
 
 # ------------------------------------------
-# TAB 2: REGISTRI DATABASE
+# TAB 2: REGISTRI DATABASE (CON DASHBOARD KPI)
 # ------------------------------------------
 with tab_registri:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
+    
+    # --- CALCOLO STATISTICHE RIEPILOGATIVE ---
+    df_b = st.session_state.bivacchi
+    df_r = st.session_state.rifugi
+    
+    tot_b, vis_b = len(df_b), len(df_b[df_b["stato_visita"] == "Visitato"])
+    plan_b, non_b = len(df_b[df_b["stato_visita"] == "Pianificato"]), len(df_b[df_b["stato_visita"] == "Non visitato"])
+    
+    tot_r, vis_r = len(df_r), len(df_r[df_r["stato_visita"] == "Visitato"])
+    plan_r, non_r = len(df_r[df_r["stato_visita"] == "Pianificato"]), len(df_r[df_r["stato_visita"] == "Non visitato"])
+    
+    # --- RENDER DASHBOARD HTML ---
+    st.markdown(f"""
+    <div style="display: flex; gap: 20px; margin-bottom: 25px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 250px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #6c757d; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
+            <h4 style="margin: 0 0 12px 0; color: #333; font-size: 15px;">⛺ STATO BIVACCHI (Tot: {tot_b})</h4>
+            <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_b}</b><br><span style="color:#555;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_b}</b><br><span style="color:#555;">Pianificati</span></div>
+                <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_b}</b><br><span style="color:#555;">Non visitati</span></div>
+            </div>
+        </div>
+        <div style="flex: 1; min-width: 250px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #6c757d; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
+            <h4 style="margin: 0 0 12px 0; color: #333; font-size: 15px;">🏠 STATO RIFUGI (Tot: {tot_r})</h4>
+            <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_r}</b><br><span style="color:#555;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_r}</b><br><span style="color:#555;">Pianificati</span></div>
+                <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_r}</b><br><span style="color:#555;">Non visitati</span></div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Colonne in minuscolo standardizzato!
     colonne_desiderate = ["name_it", "ele", "accesso", "stato_visita"]
