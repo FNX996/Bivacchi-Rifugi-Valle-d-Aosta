@@ -186,13 +186,6 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
 # ==========================================
 # GESTIONE STATO E CALLBACKS
 # ==========================================
-def handle_profile_change():
-    scelta = st.session_state.scelta_profilo_widget
-    st.session_state.autenticato = False  
-    st.session_state.creazione_in_corso = (scelta == "➕ Crea Nuovo Profilo...")
-    st.session_state.profilo_attivo = None if scelta in ["➕ Crea Nuovo Profilo...", "-- Seleziona un profilo --"] else scelta
-    if not st.session_state.creazione_in_corso and "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
-
 def autosave_quick_edit():
     nuovo_stato = st.session_state.quick_edit_selectbox
     struttura, profilo = st.session_state.struttura_attiva, st.session_state.profilo_attivo
@@ -225,35 +218,75 @@ if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", us
 
 st.sidebar.markdown("### 👤 Profilo Utente")
 lista_profili = fetch_profili_esistenti()
-opzioni_menu = ["-- Seleziona un profilo --"] + lista_profili + ["➕ Crea Nuovo Profilo..."]
 
 if "autenticato" not in st.session_state: st.session_state.autenticato = False
+if "profilo_attivo" not in st.session_state: st.session_state.profilo_attivo = None
+if "creazione_in_corso" not in st.session_state: st.session_state.creazione_in_corso = False
 if "itinerario_struttura" not in st.session_state: st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
 
-index_default = opzioni_menu.index(st.session_state.profilo_attivo) if st.session_state.get("profilo_attivo") in lista_profili else opzioni_menu.index("➕ Crea Nuovo Profilo...") if st.session_state.get("creazione_in_corso") else 0
-st.sidebar.selectbox("Scegli un profilo:", options=opzioni_menu, index=index_default, key="scelta_profilo_widget", on_change=handle_profile_change)
+# Interfaccia predittiva intelligente per la selezione o creazione profilo
+if st.session_state.profilo_attivo and st.session_state.autenticato:
+    st.sidebar.success(f"🔓 Accesso eseguito come: **{st.session_state.profilo_attivo}**")
+    if st.sidebar.button("🚪 Esci / Cambia Profilo", use_container_width=True):
+        st.session_state.profilo_attivo = None
+        st.session_state.autenticato = False
+        st.session_state.creazione_in_corso = False
+        if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
+        st.rerun()
+else:
+    # Campo di inserimento testo per l'auto-completamento dei profili
+    ricerca_utente = st.sidebar.text_input("Inserisci il tuo nome profilo:", placeholder="Inizia a scrivere...")
+    
+    if ricerca_utente.strip():
+        typed_fmt = ricerca_utente.strip().title()
+        suggestions = [p for p in lista_profili if typed_fmt.lower() in p.lower()]
+        
+        if suggestions:
+            st.sidebar.markdown("**Profili suggeriti (clicca per selezionare):**")
+            for sug in suggestions[:4]:
+                if st.sidebar.button(f"👤 {sug}", key=f"sug_{sug}", use_container_width=True):
+                    st.session_state.profilo_attivo = sug
+                    st.session_state.creazione_in_corso = False
+                    st.rerun()
+        
+        # Se il profilo digitato esiste esattamente, mostra l'opzione di conferma
+        if typed_fmt in lista_profili and st.session_state.profilo_attivo != typed_fmt:
+            if st.sidebar.button(f"Conferma '{typed_fmt}'", key="confirm_exact_profile", use_container_width=True):
+                st.session_state.profilo_attivo = typed_fmt
+                st.session_state.creazione_in_corso = False
+                st.rerun()
+        
+        # Se il profilo non esiste, mostra l'opzione per crearlo
+        if typed_fmt not in lista_profili:
+            st.sidebar.info(f"Profilo '{typed_fmt}' non trovato.")
+            if st.sidebar.button(f"➕ Crea nuovo profilo '{typed_fmt}'", use_container_width=True):
+                st.session_state.profilo_attivo = typed_fmt
+                st.session_state.creazione_in_corso = True
+                st.rerun()
 
-if st.session_state.get("profilo_attivo") and not st.session_state.autenticato:
-    if pwd := st.sidebar.text_input("Inserisci la password:", type="password", key="pass_field"):
-        if verifica_password(st.session_state.profilo_attivo, pwd):
-            st.session_state.autenticato = True
-            st.toast("🔓 Accesso eseguito!", icon="🔑")
-            st.rerun()
-        else: st.sidebar.error("❌ Password errata!")
-
-if st.session_state.get("creazione_in_corso"):
-    nome_input = st.sidebar.text_input("Nome del nuovo utente:", placeholder="Nome...")
-    password_nuova = st.sidebar.text_input("Imposta una password:", type="password", placeholder="Password...")
-    if nome_input.strip() and password_nuova.strip() and st.sidebar.button("Inizializza Profilo"):
-        p_fmt = nome_input.strip().title()
-        if p_fmt in lista_profili: st.sidebar.error("❌ Profilo già esistente!")
-        elif registra_nuovo_utente(p_fmt, password_nuova.strip()):
-            st.session_state.profilo_attivo, st.session_state.autenticato, st.session_state.creazione_in_corso = p_fmt, True, False
-            if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
-            st.rerun()
+# Finestra per l'autenticazione / Password
+if st.session_state.profilo_attivo and not st.session_state.autenticato:
+    if st.session_state.creazione_in_corso:
+        st.sidebar.markdown(f"#### 🆕 Configura Profilo: {st.session_state.profilo_attivo}")
+        new_pwd = st.sidebar.text_input("Imposta una password:", type="password", key="new_pwd_widget")
+        if new_pwd.strip() and st.sidebar.button("Registra e Accedi", use_container_width=True):
+            if registra_nuovo_utente(st.session_state.profilo_attivo, new_pwd.strip()):
+                st.session_state.autenticato = True
+                st.session_state.creazione_in_corso = False
+                st.toast("🎉 Profilo creato con successo!", icon="✅")
+                st.rerun()
+    else:
+        st.sidebar.markdown(f"#### 🔐 Login: {st.session_state.profilo_attivo}")
+        pwd = st.sidebar.text_input("Inserisci la password:", type="password", key="pass_field_widget")
+        if pwd:
+            if verifica_password(st.session_state.profilo_attivo, pwd):
+                st.session_state.autenticato = True
+                st.toast("🔓 Accesso eseguito!", icon="🔑")
+                st.rerun()
+            else: st.sidebar.error("❌ Password errata!")
 
 if not st.session_state.get("profilo_attivo") or not st.session_state.autenticato:
-    st.info("👈 Seleziona un profilo e accedi per visualizzare i dati.")
+    st.info("👈 Digita il nome del tuo profilo nella barra laterale sinistra per accedere o per crearne uno nuovo.")
     st.stop()
 
 st.sidebar.markdown("---")
@@ -272,7 +305,7 @@ st.sidebar.markdown("""
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.1 beta<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.0 beta<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
@@ -299,7 +332,7 @@ if "dati_caricati" not in st.session_state:
 
 grafo_motore, nodi_motore, albero_motore = None, None, None
 if st.session_state.sentieri is not None:
-    with st.spinner("Inizializzazione Motore A*..."):
+    with st.spinner("Inizializzazione Motore Routing..."):
         grafo_motore, nodi_motore, albero_motore = prepara_motore_routing(st.session_state.sentieri)
 
 dizionario_strutture = {
@@ -470,7 +503,7 @@ with tab_mappa:
     for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
-    # FIX LEGENDA: Utilizzo di Branca MacroElement per fissarla saldamente all'iframe e colori forzati su #333
+    # FIX LEGENDA: Utilizzo di Branca MacroElement per fissarla saldamente all'iframe e colori forzati su #333 per preservare il contrasto
     legend_template = """
     {% macro html(this, kwargs) %}
     <div style="position: absolute; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto; color: #333;">
@@ -503,7 +536,7 @@ with tab_mappa:
 
     map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
 
-    # --- AZIONI MAPPA ---
+    # --- AZIONI MAPPA E RADAR ---
     n_cliccato, clk_t, clk_m = None, map_data.get("last_object_clicked_tooltip"), map_data.get("last_clicked")
     
     if clk_t and clk_t in dizionario_strutture:
@@ -541,36 +574,82 @@ with tab_mappa:
                         st.markdown(f"**{data_str}:** {mappa_meteo_emoji(prev['weathercode'][i])} | {prev['temperature_2m_max'][i]}°C / {prev['temperature_2m_min'][i]}°C")
                 else: st.caption("Meteo non disponibile.")
 
+        # --- RADAR ESPLORAZIONE ---
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("#### 🧭 Esplora nei dintorni")
+        c_radar1, c_radar2 = st.columns(2)
+        
+        with c_radar1:
+            st.markdown("**Strutture più vicine (Linea d'aria):**")
+            strutture_vicine = []
+            for s_nome, (s_lat, s_lon, s_ele) in dizionario_strutture.items():
+                if s_nome != n_cliccato: 
+                    dist = calcola_distanza_haversine(lon_n, lat_n, s_lon, s_lat)
+                    strutture_vicine.append((dist, s_nome, s_ele))
+            
+            strutture_vicine.sort(key=lambda x: x[0]) 
+            
+            for dist, s_nome, s_ele in strutture_vicine[:3]:
+                dist_str = f"{dist:.1f} km" if dist >= 1 else f"{int(dist*1000)} m"
+                st.markdown(f"- **{s_nome}** ({s_ele}m) a *{dist_str}*")
+                
+        with c_radar2:
+            st.markdown("**Cerca itinerari della community:**")
+            
+            # 1. Komoot Discover con coordinate e centramento mappa
+            komoot_url = f"https://www.komoot.com/it-it/discover/Location/@{lat_n},{lon_n}/tours?sport=hike"
+            
+            # 2. Wikiloc con bounding box stretto attorno alle coordinate per caricare la mappa in quell'area
+            sw_lat, sw_lon = round(lat_n - 0.02, 5), round(lon_n - 0.02, 5)
+            ne_lat, ne_lon = round(lat_n + 0.02, 5), round(lon_n + 0.02, 5)
+            wikiloc_url = f"https://it.wikiloc.com/wikiloc/map.do?sw={sw_lat}%2C{sw_lon}&ne={ne_lat}%2C{ne_lon}&act=1%2C43"
+            
+            # 3. Gulliver: Ricerca testuale della struttura se cliccata, altrimenti coordinate
+            if clk_t:
+                gulliver_query = n_cliccato
+            else:
+                gulliver_query = f"Valle d'Aosta {round(lat_n, 3)} {round(lon_n, 3)}"
+            gulliver_url = f"https://www.gulliver.it/?s={gulliver_query.replace(' ', '+')}"
+            
+            # Render dei pulsanti di esplorazione esterna georeferenziata
+            c_ext1, c_ext2, c_ext3 = st.columns(3)
+            c_ext1.link_button("🟢 Komoot Hikes", url=komoot_url, use_container_width=True)
+            c_ext2.link_button("🟠 Wikiloc Map", url=wikiloc_url, use_container_width=True)
+            c_ext3.link_button("🏔️ Gulliver Search", url=gulliver_url, use_container_width=True)
+
 # ------------------------------------------
-# TAB 2: REGISTRI DATABASE (CON DASHBOARD KPI)
+# TAB 2: REGISTRI DATABASE
 # ------------------------------------------
 with tab_registri:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
     
-    # --- CALCOLO STATISTICHE RIEPILOGATIVE ---
-    df_b = st.session_state.bivacchi
-    df_r = st.session_state.rifugi
+    # Calcolo KPI dinamici per la Dashboard
+    tot_b = len(st.session_state.bivacchi)
+    vis_b = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Visitato'])
+    plan_b = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Pianificato'])
+    non_b = tot_b - vis_b - plan_b
     
-    tot_b, vis_b = len(df_b), len(df_b[df_b["stato_visita"] == "Visitato"])
-    plan_b, non_b = len(df_b[df_b["stato_visita"] == "Pianificato"]), len(df_b[df_b["stato_visita"] == "Non visitato"])
-    
-    tot_r, vis_r = len(df_r), len(df_r[df_r["stato_visita"] == "Visitato"])
-    plan_r, non_r = len(df_r[df_r["stato_visita"] == "Pianificato"]), len(df_r[df_r["stato_visita"] == "Non visitato"])
-    
-    # --- RENDER DASHBOARD HTML ---
+    tot_r = len(st.session_state.rifugi)
+    vis_r = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Visitato'])
+    plan_r = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Pianificato'])
+    non_r = tot_r - vis_r - plan_r
+
+    # Dashboard HTML allineata ed esente da errori di indentazione
     st.markdown(f"""
-    <div style="display: flex; gap: 20px; margin-bottom: 25px; flex-wrap: wrap;">
-        <div style="flex: 1; min-width: 250px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #6c757d; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <h4 style="margin: 0 0 12px 0; color: #333; font-size: 15px;">⛺ STATO BIVACCHI (Tot: {tot_b})</h4>
-            <div style="display: flex; justify-content: space-between; font-size: 13px;">
+    <div style="display: flex; gap: 20px; margin-bottom: 20px;">
+        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #28a745; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <h4 style="margin-top: 0; color: #333; text-align: center;">⛺ Riepilogo Bivacchi</h4>
+            <div style="display: flex; justify-content: space-around; margin-top: 10px;">
+                <div style="text-align: center;"><b style="color: #0055ff; font-size: 20px;">{tot_b}</b><br><span style="color:#555;">Totali</span></div>
                 <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_b}</b><br><span style="color:#555;">Visitati</span></div>
                 <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_b}</b><br><span style="color:#555;">Pianificati</span></div>
                 <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_b}</b><br><span style="color:#555;">Non visitati</span></div>
             </div>
         </div>
-        <div style="flex: 1; min-width: 250px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #6c757d; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <h4 style="margin: 0 0 12px 0; color: #333; font-size: 15px;">🏠 STATO RIFUGI (Tot: {tot_r})</h4>
-            <div style="display: flex; justify-content: space-between; font-size: 13px;">
+        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #0055ff; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <h4 style="margin-top: 0; color: #333; text-align: center;">🏠 Riepilogo Rifugi</h4>
+            <div style="display: flex; justify-content: space-around; margin-top: 10px;">
+                <div style="text-align: center;"><b style="color: #0055ff; font-size: 20px;">{tot_r}</b><br><span style="color:#555;">Totali</span></div>
                 <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_r}</b><br><span style="color:#555;">Visitati</span></div>
                 <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_r}</b><br><span style="color:#555;">Pianificati</span></div>
                 <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_r}</b><br><span style="color:#555;">Non visitati</span></div>
@@ -579,7 +658,7 @@ with tab_registri:
     </div>
     """, unsafe_allow_html=True)
     
-    # Colonne in minuscolo standardizzato!
+    # Colonne in minuscolo standardizzato
     colonne_desiderate = ["name_it", "ele", "accesso", "stato_visita"]
     cb, cr = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns], [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
 
