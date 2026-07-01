@@ -13,12 +13,10 @@ import rasterio
 import gpxpy
 import gpxpy.gpx
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
+import json
 from supabase import create_client, Client
 
-# ==========================================
-# CONFIGURAZIONE PAGINA E STILI
-# ==========================================
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
 
 st.markdown("""
@@ -32,9 +30,6 @@ st.markdown("""
 
 st.title("Esplorazione e Pianificazione VdA 🏔️")
 
-# ==========================================
-# CONNESSIONE A SUPABASE CLOUD DB
-# ==========================================
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
@@ -47,9 +42,6 @@ except Exception as e:
     st.error(f"Errore di connessione a Supabase: Verifica i Secrets. Dettaglio: {e}")
     st.stop()
 
-# ==========================================
-# FUNZIONI GLOBALI (OTTIMIZZATE)
-# ==========================================
 def calcola_distanza_haversine(lon1, lat1, lon2, lat2):
     R = 6371.0 
     dLat, dLon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
@@ -65,11 +57,10 @@ def stima_tempo_cai(dist_km, d_pos_m):
     m = int((ore_totali - h) * 60)
     return f"{h}h {m}m"
 
-# Ottimizzazione 1: Cache sulle API Meteo per evitare "freeze" al clic sulla mappa
 @st.cache_data(ttl=3600)
 def get_previsioni_meteo(lat, lon):
     try:
-        lat_r, lon_r = round(lat, 2), round(lon, 2) # Arrotondamento per massimizzare la cache
+        lat_r, lon_r = round(lat, 2), round(lon, 2)
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat_r}&longitude={lon_r}&daily=weathercode,temperature_2m_max,temperature_2m_min&timezone=Europe%2FRome&forecast_days=3"
         r = requests.get(url, timeout=3)
         if r.status_code == 200:
@@ -107,43 +98,6 @@ def calcola_profilo_dtm(traccia_coordinate, dtm_path):
         return valori_quota, int(disl_pos), int(disl_neg)
     except: return [], 0, 0
 
-# --- SUPABASE ---
-def fetch_profili_esistenti():
-    try: return sorted([row['utente'] for row in supabase.table("utenti_credenziali").select("utente").execute().data if row.get('utente')])
-    except: return []
-
-def verifica_password(utente, password_inserita):
-    try:
-        res = supabase.table("utenti_credenziali").select("password").eq("utente", utente).execute()
-        return res.data and res.data[0]["password"] == password_inserita
-    except: return False
-
-def registra_nuovo_utente(utente, password):
-    try: return supabase.table("utenti_credenziali").insert({"utente": utente, "password": password}).execute() is not None
-    except: return False
-
-def fetch_stati_dal_db(utente):
-    try: return {row['nome_struttura']: row['stato'] for row in supabase.table("stato_visite").select("*").eq("utente", utente).execute().data}
-    except: return {}
-
-# Ottimizzazione 2: Rimozione ricerca lenta. Utilizzo "get" istantaneo sulle colonne standardizzate.
-def get_val(row, col, default="N/D"):
-    val = row.get(col)
-    return val if val is not None and str(val).strip() not in ["", "None", "nan"] else default
-
-def genera_gpx(coordinate_geometria, nome_itinerario="Itinerario VdA"):
-    gpx = ['<?xml version="1.0" encoding="UTF-8"?>', '<gpx version="1.1" creator="VdA_Explorer" xmlns="http://www.topografix.com/GPX/1/1">', '  <trk>', f'    <name>{nome_itinerario}</name>', '    <trkseg>']
-    gpx.extend([f'      <trkpt lat="{lat}" lon="{lon}"></trkpt>' for lon, lat in coordinate_geometria])
-    gpx.extend(['    </trkseg>', '  </trk>', '</gpx>'])
-    return "\n".join(gpx)
-
-def genera_google_maps_url(punti_coords):
-    if len(punti_coords) < 2: return "#"
-    url = f"https://www.google.com/maps/dir/?api=1&origin={punti_coords[0][0]},{punti_coords[0][1]}&destination={punti_coords[-1][0]},{punti_coords[-1][1]}&travelmode=walking"
-    if len(punti_coords) > 2: url += "&waypoints=" + "%7C".join([f"{lat},{lon}" for lat, lon in punti_coords[1:-1]])
-    return url
-
-# --- ROUTING A-STAR ---
 @st.cache_resource(show_spinner=False)
 def prepara_motore_routing(_gdf):
     G = nx.Graph()
@@ -174,8 +128,6 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
         for i in range(len(punti_coords)-1):
             nodo1 = nodi[albero.query((punti_coords[i][1], punti_coords[i][0]))[1]]
             nodo2 = nodi[albero.query((punti_coords[i+1][1], punti_coords[i+1][0]))[1]]
-            
-            # Ottimizzazione 3: Utilizzo ultra-veloce di A* al posto di Dijkstra
             path = nx.astar_path(G, source=nodo1, target=nodo2, heuristic=euristica_astar, weight='weight')
             distanza_km += sum(G[path[j]][path[j+1]]['weight'] for j in range(len(path)-1))
             traccia_totale.extend(path if i == 0 else path[1:])
@@ -183,9 +135,80 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
         return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
     except nx.NetworkXNoPath: return None
 
-# ==========================================
-# GESTIONE STATO E CALLBACKS
-# ==========================================
+def fetch_profili_esistenti():
+    try: return sorted([row['utente'] for row in supabase.table("utenti_credenziali").select("utente").execute().data if row.get('utente')])
+    except: return []
+
+def verifica_password(utente, password_inserita):
+    try:
+        res = supabase.table("utenti_credenziali").select("password").eq("utente", utente).execute()
+        return res.data and res.data[0]["password"] == password_inserita
+    except: return False
+
+def registra_nuovo_utente(utente, password):
+    try: return supabase.table("utenti_credenziali").insert({"utente": utente, "password": password}).execute() is not None
+    except: return False
+
+def fetch_stati_dal_db(utente):
+    try: return {row['nome_struttura']: row['stato'] for row in supabase.table("stato_visite").select("*").eq("utente", utente).execute().data}
+    except: return {}
+
+def get_val(row, col, default="N/D"):
+    val = row.get(col)
+    return val if val is not None and str(val).strip() not in ["", "None", "nan"] else default
+
+def genera_gpx(coordinate_geometria, nome_itinerario="Itinerario VdA"):
+    gpx = ['<?xml version="1.0" encoding="UTF-8"?>', '<gpx version="1.1" creator="VdA_Explorer" xmlns="http://www.topografix.com/GPX/1/1">', '  <trk>', f'    <name>{nome_itinerario}</name>', '    <trkseg>']
+    gpx.extend([f'      <trkpt lat="{lat}" lon="{lon}"></trkpt>' for lon, lat in coordinate_geometria])
+    gpx.extend(['    </trkseg>', '  </trk>', '</gpx>'])
+    return "\n".join(gpx)
+
+def carica_tracce_gpx_cloud(utente):
+    try:
+        res = supabase.table("tracce_gpx").select("*").eq("utente", utente).execute()
+        tracce = {}
+        if res.data:
+            for row in res.data:
+                tracce[row['nome']] = {
+                    "descrizione": row.get('descrizione', ""),
+                    "visibile": row.get('visibile', True),
+                    "dati": row.get('dati_json', {})
+                }
+        return tracce
+    except Exception as e:
+        st.error(f"Errore caricamento GPX cloud: {e}")
+        return {}
+
+def salva_traccia_gpx(utente, nome, descrizione, visibile, dati_json):
+    try:
+        dati_puliti = json.loads(json.dumps(dati_json, allow_nan=False))
+        # Verifica se esiste per fare Update o Insert (simula Upsert)
+        res = supabase.table("tracce_gpx").select("id").eq("utente", utente).eq("nome", nome).execute()
+        if res.data:
+            supabase.table("tracce_gpx").update({
+                "descrizione": descrizione,
+                "visibile": visibile,
+                "dati_json": dati_puliti
+            }).eq("id", res.data[0]["id"]).execute()
+        else:
+            supabase.table("tracce_gpx").insert({
+                "utente": utente,
+                "nome": nome,
+                "descrizione": descrizione,
+                "visibile": visibile,
+                "dati_json": dati_puliti
+            }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Errore di salvataggio GPX cloud: {e}")
+        return False
+
+def aggiorna_metadati_gpx(utente, nome, campo, valore):
+    try:
+        supabase.table("tracce_gpx").update({campo: valore}).eq("utente", utente).eq("nome", nome).execute()
+    except Exception as e:
+        st.error(f"Errore aggiornamento {campo}: {e}")
+
 def autosave_quick_edit():
     nuovo_stato = st.session_state.quick_edit_selectbox
     struttura, profilo = st.session_state.struttura_attiva, st.session_state.profilo_attivo
@@ -211,82 +234,56 @@ def sync_tables_cloud(df_name, editor_key):
                 records.append({"nome_struttura": df.loc[row_idx, "name_it"], "stato": nuovo_stato, "utente": st.session_state.profilo_attivo})
         if records: supabase.table("stato_visite").upsert(records).execute()
 
-# ==========================================
-# SIDEBAR
-# ==========================================
 if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", use_container_width=True)
 
 st.sidebar.markdown("### 👤 Profilo Utente")
 lista_profili = fetch_profili_esistenti()
 
 if "autenticato" not in st.session_state: st.session_state.autenticato = False
-if "profilo_attivo" not in st.session_state: st.session_state.profilo_attivo = None
-if "creazione_in_corso" not in st.session_state: st.session_state.creazione_in_corso = False
 if "itinerario_struttura" not in st.session_state: st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
 
-# Interfaccia predittiva intelligente per la selezione o creazione profilo
-if st.session_state.profilo_attivo and st.session_state.autenticato:
-    st.sidebar.success(f"🔓 Accesso eseguito come: **{st.session_state.profilo_attivo}**")
-    if st.sidebar.button("🚪 Esci / Cambia Profilo", use_container_width=True):
-        st.session_state.profilo_attivo = None
-        st.session_state.autenticato = False
-        st.session_state.creazione_in_corso = False
-        if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
-        st.rerun()
-else:
-    # Campo di inserimento testo per l'auto-completamento dei profili
-    ricerca_utente = st.sidebar.text_input("Inserisci il tuo nome profilo:", placeholder="Inizia a scrivere...")
-    
-    if ricerca_utente.strip():
-        typed_fmt = ricerca_utente.strip().title()
-        suggestions = [p for p in lista_profili if typed_fmt.lower() in p.lower()]
-        
-        if suggestions:
-            st.sidebar.markdown("**Profili suggeriti (clicca per selezionare):**")
-            for sug in suggestions[:4]:
-                if st.sidebar.button(f"👤 {sug}", key=f"sug_{sug}", use_container_width=True):
-                    st.session_state.profilo_attivo = sug
-                    st.session_state.creazione_in_corso = False
-                    st.rerun()
-        
-        # Se il profilo digitato esiste esattamente, mostra l'opzione di conferma
-        if typed_fmt in lista_profili and st.session_state.profilo_attivo != typed_fmt:
-            if st.sidebar.button(f"Conferma '{typed_fmt}'", key="confirm_exact_profile", use_container_width=True):
-                st.session_state.profilo_attivo = typed_fmt
-                st.session_state.creazione_in_corso = False
-                st.rerun()
-        
-        # Se il profilo non esiste, mostra l'opzione per crearlo
-        if typed_fmt not in lista_profili:
-            st.sidebar.info(f"Profilo '{typed_fmt}' non trovato.")
-            if st.sidebar.button(f"➕ Crea nuovo profilo '{typed_fmt}'", use_container_width=True):
-                st.session_state.profilo_attivo = typed_fmt
-                st.session_state.creazione_in_corso = True
-                st.rerun()
+profilo_input = st.sidebar.text_input("Cerca o digita il tuo profilo:")
 
-# Finestra per l'autenticazione / Password
-if st.session_state.profilo_attivo and not st.session_state.autenticato:
-    if st.session_state.creazione_in_corso:
-        st.sidebar.markdown(f"#### 🆕 Configura Profilo: {st.session_state.profilo_attivo}")
-        new_pwd = st.sidebar.text_input("Imposta una password:", type="password", key="new_pwd_widget")
-        if new_pwd.strip() and st.sidebar.button("Registra e Accedi", use_container_width=True):
-            if registra_nuovo_utente(st.session_state.profilo_attivo, new_pwd.strip()):
-                st.session_state.autenticato = True
-                st.session_state.creazione_in_corso = False
-                st.toast("🎉 Profilo creato con successo!", icon="✅")
-                st.rerun()
+if profilo_input:
+    match = [p for p in lista_profili if p.lower().startswith(profilo_input.lower())]
+    if match:
+        scelta = st.sidebar.radio("Profili trovati:", match)
+        if st.sidebar.button("Accedi con questo profilo"):
+            st.session_state.scelta_profilo_widget = scelta
+            st.session_state.creazione_in_corso = False
+            st.session_state.profilo_attivo = scelta
+            st.session_state.autenticato = False
+            if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
+            st.rerun()
     else:
-        st.sidebar.markdown(f"#### 🔐 Login: {st.session_state.profilo_attivo}")
-        pwd = st.sidebar.text_input("Inserisci la password:", type="password", key="pass_field_widget")
-        if pwd:
-            if verifica_password(st.session_state.profilo_attivo, pwd):
-                st.session_state.autenticato = True
-                st.toast("🔓 Accesso eseguito!", icon="🔑")
-                st.rerun()
-            else: st.sidebar.error("❌ Password errata!")
+        st.sidebar.info("Profilo non trovato. Vuoi crearne uno nuovo?")
+        if st.sidebar.button("➕ Crea Nuovo Profilo"):
+            st.session_state.scelta_profilo_widget = "➕ Crea Nuovo Profilo..."
+            st.session_state.creazione_in_corso = True
+            st.session_state.profilo_attivo = None
+            st.rerun()
+
+if st.session_state.get("profilo_attivo") and not st.session_state.autenticato:
+    if pwd := st.sidebar.text_input(f"Inserisci la password per {st.session_state.profilo_attivo}:", type="password", key="pass_field"):
+        if verifica_password(st.session_state.profilo_attivo, pwd):
+            st.session_state.autenticato = True
+            st.toast("🔓 Accesso eseguito!", icon="🔑")
+            st.rerun()
+        else: st.sidebar.error("❌ Password errata!")
+
+if st.session_state.get("creazione_in_corso"):
+    nome_nuovo = st.sidebar.text_input("Nome del nuovo utente:", placeholder="Nome completo...")
+    password_nuova = st.sidebar.text_input("Imposta una password:", type="password", placeholder="Password...")
+    if nome_nuovo.strip() and password_nuova.strip() and st.sidebar.button("Inizializza Profilo"):
+        p_fmt = nome_nuovo.strip().title()
+        if p_fmt in lista_profili: st.sidebar.error("❌ Profilo già esistente!")
+        elif registra_nuovo_utente(p_fmt, password_nuova.strip()):
+            st.session_state.profilo_attivo, st.session_state.autenticato, st.session_state.creazione_in_corso = p_fmt, True, False
+            if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
+            st.rerun()
 
 if not st.session_state.get("profilo_attivo") or not st.session_state.autenticato:
-    st.info("👈 Digita il nome del tuo profilo nella barra laterale sinistra per accedere o per crearne uno nuovo.")
+    st.info("👈 Digita il tuo profilo per accedere o creane uno nuovo.")
     st.stop()
 
 st.sidebar.markdown("---")
@@ -298,28 +295,25 @@ st.sidebar.markdown("""
 <div style="background-color: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
     <h5 style="margin-top: 0; color: #f8fafc; font-size: 15px; font-weight: 600;">💡 Guida Rapida</h5>
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
-        <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato.</li>
+        <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato. Radar esplorazione attivo!</li>
         <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
-        <li><b>Registri:</b> Gestisci e riepiloga gli stati delle strutture visitate.</li>
-        <li><b>GPX:</b> Importa, analizza e visualizza le tue tracce.</li>
+        <li><b>GPX:</b> Importa, analizza e visualizza le tue tracce cloud.</li>
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.0 beta<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.2 beta<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# CARICAMENTO DATI ULTRA-VELOCE
-# ==========================================
 if "dati_caricati" not in st.session_state:
     stati_cloud = fetch_stati_dal_db(st.session_state.profilo_attivo)
+    
+    # Carica le tracce GPX salvate nel Cloud per questo utente
+    st.session_state.tracce_gpx = carica_tracce_gpx_cloud(st.session_state.profilo_attivo)
+    
     if os.path.exists("bivacchi_vda.geojson") and os.path.exists("rifugi_vda.geojson"):
         gdf_b, gdf_r = gpd.read_file("bivacchi_vda.geojson"), gpd.read_file("rifugi_vda.geojson")
-        
-        # OTTIMIZZAZIONE CRITICA: Lowercase istantaneo di tutte le colonne.
         gdf_b.columns, gdf_r.columns = gdf_b.columns.str.lower(), gdf_r.columns.str.lower()
-        
         gdf_b["stato_visita"] = [stati_cloud.get(r.get("name_it"), "Non visitato") for _, r in gdf_b.iterrows()]
         gdf_r["stato_visita"] = [stati_cloud.get(r.get("name_it"), "Non visitato") for _, r in gdf_r.iterrows()]
         
@@ -332,7 +326,7 @@ if "dati_caricati" not in st.session_state:
 
 grafo_motore, nodi_motore, albero_motore = None, None, None
 if st.session_state.sentieri is not None:
-    with st.spinner("Inizializzazione Motore Routing..."):
+    with st.spinner("Inizializzazione Motore A*..."):
         grafo_motore, nodi_motore, albero_motore = prepara_motore_routing(st.session_state.sentieri)
 
 dizionario_strutture = {
@@ -346,70 +340,109 @@ mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].i
 # ==========================================
 # UI TABS
 # ==========================================
-tab_mappa, tab_registri, tab_gpx = st.tabs(["🗺️ Esplora & Pianifica", "📊 Registri Strutture", "📂 Analisi GPX"])
+tab_mappa, tab_registri, tab_gpx = st.tabs(["🗺️ Esplora & Pianifica", "📊 Registri Strutture", "📂 Archivio GPX"])
 
-# ------------------------------------------
-# TAB 3: IMPORTAZIONE GPX
-# ------------------------------------------
 with tab_gpx:
-    st.subheader("📂 Analizzatore File GPX Personali")
-    uploaded_gpx = st.file_uploader("Trascina qui il tuo file .gpx", type=["gpx"], key="gpx_uploader")
+    st.subheader("📂 Il tuo Archivio GPX")
+    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud. Potrai gestirne la visibilità in mappa, analizzarne le quote e aggiungere descrizioni.")
+    
+    if "tracce_gpx" in st.session_state and st.session_state.tracce_gpx:
+        st.info(f"📊 **Totale Tracce nel tuo archivio:** {len(st.session_state.tracce_gpx)}")
+    
+    uploaded_files = st.file_uploader("Trascina o seleziona una o più tracce .gpx", type=["gpx"], accept_multiple_files=True)
 
-    if uploaded_gpx is not None:
-        content = uploaded_gpx.getvalue()
-        # FIX GPX: Aspetta che il buffer di Streamlit sia pieno per evitare il flash di errore
-        if len(content) > 0:
-            if ("gpx_caricato" not in st.session_state) or (st.session_state.gpx_caricato.get("file_name") != uploaded_gpx.name):
-                try:
-                    # FIX GPX: Decodifica sicura multi-formato
-                    try:
-                        gpx_string = content.decode('utf-8')
-                    except UnicodeDecodeError:
-                        gpx_string = content.decode('ISO-8859-1')
-                    
-                    gpx = gpxpy.parse(gpx_string)
-                    
-                    pts, quote, d_pos, d_neg, dist = [], [], 0, 0, 0
-                    last_pt = None
-                    
-                    for t in gpx.tracks:
-                        for s in t.segments:
-                            for p in s.points:
-                                pts.append((p.latitude, p.longitude))
-                                if p.elevation is not None: quote.append(p.elevation)
-                                if last_pt:
-                                    dist += calcola_distanza_haversine(last_pt.longitude, last_pt.latitude, p.longitude, p.latitude)
-                                    if p.elevation is not None and last_pt.elevation is not None:
-                                        diff = p.elevation - last_pt.elevation
-                                        if diff > 0: d_pos += diff
-                                        else: d_neg += abs(diff)
-                                last_pt = p
-                    
-                    st.session_state.gpx_caricato = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "name": gpx.tracks[0].name if gpx.tracks and gpx.tracks[0].name else "Traccia Personale GPS", "file_name": uploaded_gpx.name}
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore decodifica GPX: {e}")
-            else:
-                st.success("✅ Traccia pronta nella scheda 'Mappa & Itinerari' (colore viola).")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Nome Traccia", st.session_state.gpx_caricato['name'])
-                c2.metric("Distanza GPS", f"{st.session_state.gpx_caricato['dist']} km")
-                c3.metric("Dislivello Positivo", f"D+ {st.session_state.gpx_caricato['d_pos']} m")
-                c4.metric("Dislivello Negativo", f"D- {st.session_state.gpx_caricato['d_neg']} m")
+    if uploaded_files:
+        for uploaded_gpx in uploaded_files:
+            content = uploaded_gpx.getvalue()
+            if len(content) > 0:
+                base_nome = uploaded_gpx.name
                 
-                if st.session_state.gpx_caricato.get('quote'):
-                    if fig_gpx := disegna_profilo_altimetrico(st.session_state.gpx_caricato['quote'], st.session_state.gpx_caricato['dist'], "Profilo Registrato"):
-                        st.plotly_chart(fig_gpx, use_container_width=True)
-                if st.button("❌ Rimuovi Traccia", type="secondary"):
-                    del st.session_state["gpx_caricato"]
-                    st.rerun()
-    elif "gpx_caricato" in st.session_state:
-        del st.session_state["gpx_caricato"]
-        st.rerun()
+                # Evita elaborazioni inutili se già in memoria
+                if base_nome not in st.session_state.tracce_gpx:
+                    try:
+                        try:
+                            gpx_string = content.decode('utf-8')
+                        except UnicodeDecodeError:
+                            gpx_string = content.decode('ISO-8859-1')
+                        
+                        gpx = gpxpy.parse(gpx_string)
+                        pts, quote, d_pos, d_neg, dist = [], [], 0, 0, 0
+                        last_pt = None
+                        
+                        for t in gpx.tracks:
+                            for s in t.segments:
+                                for p in s.points:
+                                    pts.append((p.latitude, p.longitude))
+                                    if p.elevation is not None: quote.append(p.elevation)
+                                    if last_pt:
+                                        dist += calcola_distanza_haversine(last_pt.longitude, last_pt.latitude, p.longitude, p.latitude)
+                                        if p.elevation is not None and last_pt.elevation is not None:
+                                            diff = p.elevation - last_pt.elevation
+                                            if diff > 0: d_pos += diff
+                                            else: d_neg += abs(diff)
+                                    last_pt = p
+                        
+                        dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata"}
+                        
+                        st.session_state.tracce_gpx[base_nome] = {
+                            "descrizione": "",
+                            "visibile": True,
+                            "dati": dati_gpx
+                        }
+                        
+                        # Salvataggio nel database Supabase
+                        salva_traccia_gpx(st.session_state.profilo_attivo, base_nome, "", True, dati_gpx)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Errore decodifica GPX {base_nome}: {e}")
 
-# ------------------------------------------
-# TAB 1: MAPPA E ITINERARI
-# ------------------------------------------
+    st.markdown("---")
+    
+    # Rendering dell'elenco espandibile per le tracce caricate in cloud
+    if st.session_state.get("tracce_gpx"):
+        for nome_traccia, info in list(st.session_state.tracce_gpx.items()):
+            stato_traccia = info["dati"].get("stato", "Pianificata")
+            icona_stato = "✅" if stato_traccia == "Svolta" else "⏳"
+            
+            with st.expander(f"{icona_stato} 🗺️ {nome_traccia}", expanded=False):
+                c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                c1.metric("Distanza", f"{info['dati']['dist']} km")
+                c2.metric("Dislivello +", f"D+ {info['dati']['d_pos']} m")
+                c3.metric("Dislivello -", f"D- {info['dati']['d_neg']} m")
+                
+                visibile = c4.toggle("Mostra in Mappa", value=info.get("visibile", True), key=f"vis_{nome_traccia}")
+                if visibile != info.get("visibile", True):
+                    st.session_state.tracce_gpx[nome_traccia]["visibile"] = visibile
+                    aggiorna_metadati_gpx(st.session_state.profilo_attivo, nome_traccia, "visibile", visibile)
+                    st.rerun()
+
+                c_stato, c_desc = st.columns([1, 2])
+                with c_stato:
+                    nuovo_stato = st.selectbox("Stato Traccia:", ["Pianificata", "Svolta"], index=0 if stato_traccia=="Pianificata" else 1, key=f"stato_{nome_traccia}")
+                    if nuovo_stato != stato_traccia:
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["stato"] = nuovo_stato
+                        salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info.get("descrizione", ""), info.get("visibile", True), st.session_state.tracce_gpx[nome_traccia]["dati"])
+                        st.rerun()
+
+                with c_desc:
+                    desc = st.text_area("Descrizione della traccia:", value=info.get("descrizione", ""), key=f"desc_{nome_traccia}", label_visibility="collapsed")
+                    if desc != info.get("descrizione", ""):
+                        st.session_state.tracce_gpx[nome_traccia]["descrizione"] = desc
+                        aggiorna_metadati_gpx(st.session_state.profilo_attivo, nome_traccia, "descrizione", desc)
+
+                if info["dati"].get("quote"):
+                    fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
+                    if fig_gpx: st.plotly_chart(fig_gpx, use_container_width=True)
+                    
+                if st.button("❌ Elimina definitivamente", key=f"del_{nome_traccia}", type="secondary"):
+                    try:
+                        supabase.table("tracce_gpx").delete().eq("utente", st.session_state.profilo_attivo).eq("nome", nome_traccia).execute()
+                        del st.session_state.tracce_gpx[nome_traccia]
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore eliminazione dal database: {e}")
+
 with tab_mappa:
     with st.container(border=True):
         st.subheader("🧭 Pianificatore Itinerario")
@@ -448,9 +481,7 @@ with tab_mappa:
             
             c1, c2 = st.columns(2)
             c1.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", use_container_width=True)
-            c2.link_button("🗺️ Apri in Google Maps", url=genera_google_maps_url([(p[1], p[2]) for p in punti_it]), use_container_width=True)
 
-    # --- MAPPA FOLIUM ---
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
     folium.TileLayer('OpenStreetMap', name='Topografica (OSM)', overlay=False).add_to(m)
@@ -462,7 +493,6 @@ with tab_mappa:
         n, q, a, s = get_val(row, "name_it"), get_val(row, "ele"), get_val(row, "accesso"), get_val(row, "stato_visita", "Non visitato")
         link = get_val(row, "link1_href", "#")
         desc = get_val(row, "desc_it", "")
-        
         lat, lon = row.geometry.y, row.geometry.x
         meteo_url = f"https://www.meteoblue.com/it/tempo/settimana/{round(lat, 4)}N{round(lon, 4)}E"
         
@@ -488,10 +518,25 @@ with tab_mappa:
     if st.session_state.get("itinerario_attivo"):
         folium.GeoJson(st.session_state.itinerario_attivo['geometry'], style_function=lambda x: {'color': '#0055ff', 'weight': 5, 'opacity': 0.9}, name="📍 Traccia Calcolata").add_to(m)
 
-    if st.session_state.get("gpx_caricato"):
-        folium.PolyLine(locations=st.session_state.gpx_caricato["points"], color="#8e44ad", weight=6, opacity=0.8, tooltip="Traccia GPX", name="🗺️ Traccia GPX").add_to(m)
+    # Render Multiple GPX Tracks from Cloud Session
+    if "tracce_gpx" in st.session_state:
+        colori_gpx = ["#8e44ad", "#e74c3c", "#3498db", "#16a085", "#d35400", "#c0392b"]
+        idx_colore = 0
+        for nome_traccia, info in st.session_state.tracce_gpx.items():
+            if info.get("visibile", True):
+                colore = colori_gpx[idx_colore % len(colori_gpx)]
+                stato_t = info["dati"].get("stato", "Pianificata")
+                folium.PolyLine(
+                    locations=info["dati"]["points"], 
+                    color=colore, 
+                    weight=5, 
+                    opacity=0.8, 
+                    tooltip=f"GPX: {nome_traccia} ({stato_t})", 
+                    name=nome_traccia
+                ).add_to(m)
+                idx_colore += 1
 
-    # Marker UI
+    # Indicatori Partenza/Tappa/Arrivo
     for k, ic, col in [("partenza", "🛫", "#0055ff"), ("arrivo", "🛬", "#ff0000")]:
         if node := st.session_state.itinerario_struttura.get(k):
             folium.Marker([node[1], node[2]], tooltip=f"{k.upper()}: {node[0]}", icon=folium.DivIcon(html=f"<div style='background:{col}; width:45px; height:45px; border-radius:50%; border:3px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size:22px; color:white;'>{ic}</div>", icon_size=(45, 45), icon_anchor=(22, 22))).add_to(m)
@@ -499,14 +544,13 @@ with tab_mappa:
     for t in st.session_state.itinerario_struttura.get("tappe", []):
         folium.Marker([t[1], t[2]], tooltip=f"TAPPA: {t[0]}", icon=folium.DivIcon(html="<div style='background:#ff8800; width:40px; height:40px; border-radius:50%; border:3px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size:18px; color:white;'>🛑</div>", icon_size=(40, 40), icon_anchor=(20, 20))).add_to(m)
 
-    # Creazione iterativa ottimizzata
     for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
-    # FIX LEGENDA: Utilizzo di Branca MacroElement per fissarla saldamente all'iframe e colori forzati su #333 per preservare il contrasto
+    # FIX LEGENDA: Color forced to #333 and #000 to prevent invisible text
     legend_template = """
     {% macro html(this, kwargs) %}
-    <div style="position: absolute; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto; color: #333;">
+    <div style="position: fixed; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto;">
         <b style="font-size: 14px; display: block; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; color: #000;">🗺️ Legenda</b>
         <div style="margin-bottom: 8px;">
             <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tracciati</span>
@@ -531,12 +575,11 @@ with tab_mappa:
     macro = MacroElement()
     macro._template = Template(legend_template)
     m.get_root().add_child(macro)
-
+    
     folium.LayerControl(position='topright').add_to(m)
 
     map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
 
-    # --- AZIONI MAPPA E RADAR ---
     n_cliccato, clk_t, clk_m = None, map_data.get("last_object_clicked_tooltip"), map_data.get("last_clicked")
     
     if clk_t and clk_t in dizionario_strutture:
@@ -565,6 +608,18 @@ with tab_mappa:
                 st_corr = next((r["stato_visita"] for df in [st.session_state.bivacchi, st.session_state.rifugi] for _, r in df.iterrows() if r["name_it"] == clk_t), "Non visitato")
                 st.selectbox("Modifica stato cloud:", options=stati_disponibili, index=stati_disponibili.index(st_corr), key="quick_edit_selectbox", on_change=autosave_quick_edit)
 
+            st.markdown("#### 🎯 Radar Esplorazione")
+            distanze = []
+            for nome_str, (lat_s, lon_s, q_s) in dizionario_strutture.items():
+                if nome_str != n_cliccato:
+                    d = calcola_distanza_haversine(lon_n, lat_n, lon_s, lat_s)
+                    distanze.append((nome_str, d, q_s))
+            
+            distanze.sort(key=lambda x: x[1])
+            for i, (nm, d, q) in enumerate(distanze[:3]):
+                dist_txt = f"{round(d*1000)} m" if d < 1 else f"{round(d, 1)} km"
+                st.markdown(f"**{i+1}. {nm}** ({round(q)}m) a 📏 {dist_txt}")
+
         with cm:
             st.markdown("🌤️ **Previsioni a 3 giorni**")
             with st.spinner("Cerco..."):
@@ -573,86 +628,46 @@ with tab_mappa:
                         data_str = "Oggi" if i==0 else "Domani" if i==1 else datetime.strptime(prev['time'][i], "%Y-%m-%d").strftime("%d/%m")
                         st.markdown(f"**{data_str}:** {mappa_meteo_emoji(prev['weathercode'][i])} | {prev['temperature_2m_max'][i]}°C / {prev['temperature_2m_min'][i]}°C")
                 else: st.caption("Meteo non disponibile.")
-
-        # --- RADAR ESPLORAZIONE ---
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("#### 🧭 Esplora nei dintorni")
-        c_radar1, c_radar2 = st.columns(2)
-        
-        with c_radar1:
-            st.markdown("**Strutture più vicine (Linea d'aria):**")
-            strutture_vicine = []
-            for s_nome, (s_lat, s_lon, s_ele) in dizionario_strutture.items():
-                if s_nome != n_cliccato: 
-                    dist = calcola_distanza_haversine(lon_n, lat_n, s_lon, s_lat)
-                    strutture_vicine.append((dist, s_nome, s_ele))
-            
-            strutture_vicine.sort(key=lambda x: x[0]) 
-            
-            for dist, s_nome, s_ele in strutture_vicine[:3]:
-                dist_str = f"{dist:.1f} km" if dist >= 1 else f"{int(dist*1000)} m"
-                st.markdown(f"- **{s_nome}** ({s_ele}m) a *{dist_str}*")
                 
-        with c_radar2:
-            st.markdown("**Cerca itinerari della community:**")
+            st.markdown("#### 🌐 Smart Links Community")
+            bb_offset = 0.02
+            url_wikiloc = f"https://it.wikiloc.com/percorsi/outdoor?t=&d=&lfr=&lto=&a=outdoor&q=&s=id&f=&u=0&k=1&m=&p=&act=&n=&c=&map={lat_n-bb_offset},{lon_n-bb_offset},{lat_n+bb_offset},{lon_n+bb_offset},4&rd=1"
+            st.link_button("🟢 Cerca in area su Wikiloc", url=url_wikiloc, use_container_width=True)
             
-            # 1. Komoot Discover con coordinate e centramento mappa
-            komoot_url = f"https://www.komoot.com/it-it/discover/Location/@{lat_n},{lon_n}/tours?sport=hike"
+            url_komoot = f"https://www.komoot.com/it-it/discover/Location/@{lat_n},{lon_n}/tours?sport=hike"
+            st.link_button("🌲 Cerca in area su Komoot", url=url_komoot, use_container_width=True)
             
-            # 2. Wikiloc con bounding box stretto attorno alle coordinate per caricare la mappa in quell'area
-            sw_lat, sw_lon = round(lat_n - 0.02, 5), round(lon_n - 0.02, 5)
-            ne_lat, ne_lon = round(lat_n + 0.02, 5), round(lon_n + 0.02, 5)
-            wikiloc_url = f"https://it.wikiloc.com/wikiloc/map.do?sw={sw_lat}%2C{sw_lon}&ne={ne_lat}%2C{ne_lon}&act=1%2C43"
-            
-            # 3. Gulliver: Ricerca testuale della struttura se cliccata, altrimenti coordinate
-            if clk_t:
-                gulliver_query = n_cliccato
-            else:
-                gulliver_query = f"Valle d'Aosta {round(lat_n, 3)} {round(lon_n, 3)}"
-            gulliver_url = f"https://www.gulliver.it/?s={gulliver_query.replace(' ', '+')}"
-            
-            # Render dei pulsanti di esplorazione esterna georeferenziata
-            c_ext1, c_ext2, c_ext3 = st.columns(3)
-            c_ext1.link_button("🟢 Komoot Hikes", url=komoot_url, use_container_width=True)
-            c_ext2.link_button("🟠 Wikiloc Map", url=wikiloc_url, use_container_width=True)
-            c_ext3.link_button("🏔️ Gulliver Search", url=gulliver_url, use_container_width=True)
+            url_gulliver = f"https://www.gulliver.it/?s={n_cliccato.replace(' ', '+')}" if clk_t else "https://www.gulliver.it/itinerari/?paese=italia&regione=valle-daosta"
+            st.link_button("🏔️ Cerca su Gulliver", url=url_gulliver, use_container_width=True)
 
-# ------------------------------------------
-# TAB 2: REGISTRI DATABASE
-# ------------------------------------------
 with tab_registri:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
     
-    # Calcolo KPI dinamici per la Dashboard
-    tot_b = len(st.session_state.bivacchi)
-    vis_b = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Visitato'])
-    plan_b = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Pianificato'])
-    non_b = tot_b - vis_b - plan_b
+    # KPI DASHBOARD (Indented properly)
+    tot_biv = len(st.session_state.bivacchi)
+    vis_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Visitato'])
+    plan_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Pianificato'])
     
-    tot_r = len(st.session_state.rifugi)
-    vis_r = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Visitato'])
-    plan_r = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Pianificato'])
-    non_r = tot_r - vis_r - plan_r
-
-    # Dashboard HTML allineata ed esente da errori di indentazione
+    tot_rif = len(st.session_state.rifugi)
+    vis_rif = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Visitato'])
+    plan_rif = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Pianificato'])
+    
     st.markdown(f"""
     <div style="display: flex; gap: 20px; margin-bottom: 20px;">
-        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #28a745; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-            <h4 style="margin-top: 0; color: #333; text-align: center;">⛺ Riepilogo Bivacchi</h4>
+        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top: 0; text-align: center; color: #333;">⛺ Riepilogo Bivacchi</h4>
             <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #0055ff; font-size: 20px;">{tot_b}</b><br><span style="color:#555;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_b}</b><br><span style="color:#555;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_b}</b><br><span style="color:#555;">Pianificati</span></div>
-                <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_b}</b><br><span style="color:#555;">Non visitati</span></div>
+                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_biv}</b><br><span style="color:#555;">Totali</span></div>
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_biv}</b><br><span style="color:#555;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_biv}</b><br><span style="color:#555;">Pianificati</span></div>
             </div>
         </div>
-        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #0055ff; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-            <h4 style="margin-top: 0; color: #333; text-align: center;">🏠 Riepilogo Rifugi</h4>
+        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top: 0; text-align: center; color: #333;">🏠 Riepilogo Rifugi</h4>
             <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #0055ff; font-size: 20px;">{tot_r}</b><br><span style="color:#555;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_r}</b><br><span style="color:#555;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_r}</b><br><span style="color:#555;">Pianificati</span></div>
-                <div style="text-align: center;"><b style="color: #dc3545; font-size: 20px;">{non_r}</b><br><span style="color:#555;">Non visitati</span></div>
+                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_rif}</b><br><span style="color:#555;">Totali</span></div>
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_rif}</b><br><span style="color:#555;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_rif}</b><br><span style="color:#555;">Pianificati</span></div>
             </div>
         </div>
     </div>
@@ -660,7 +675,8 @@ with tab_registri:
     
     # Colonne in minuscolo standardizzato
     colonne_desiderate = ["name_it", "ele", "accesso", "stato_visita"]
-    cb, cr = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns], [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
+    cb = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns]
+    cr = [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
 
     col1, col2 = st.columns(2)
     with col1:
