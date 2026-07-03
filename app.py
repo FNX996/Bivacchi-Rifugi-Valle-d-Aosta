@@ -114,7 +114,7 @@ def prepara_motore_routing(_gdf):
     if not nodi_lista: return None, None, None
     albero = cKDTree(nodi_lista)
     
-    pairs = albero.query_pairs(r=0.00027) # Snapping a 30m
+    pairs = albero.query_pairs(r=0.00027) # Snapping a 30m circa
     for i, j in pairs:
         n1, n2 = nodi_lista[i], nodi_lista[j]
         if not G.has_edge(n1, n2):
@@ -182,32 +182,36 @@ def carica_tracce_gpx_cloud(utente):
 def salva_traccia_gpx(utente, nome, descrizione, visibile, dati_json):
     try:
         dati_puliti = json.loads(json.dumps(dati_json, allow_nan=False))
-        # Verifica se esiste per fare Update o Insert (simula Upsert)
         res = supabase.table("tracce_gpx").select("id").eq("utente", utente).eq("nome", nome).execute()
         if res.data:
-            supabase.table("tracce_gpx").update({
-                "descrizione": descrizione,
-                "visibile": visibile,
-                "dati_json": dati_puliti
-            }).eq("id", res.data[0]["id"]).execute()
+            supabase.table("tracce_gpx").update({"descrizione": descrizione, "visibile": visibile, "dati_json": dati_puliti}).eq("id", res.data[0]["id"]).execute()
         else:
-            supabase.table("tracce_gpx").insert({
-                "utente": utente,
-                "nome": nome,
-                "descrizione": descrizione,
-                "visibile": visibile,
-                "dati_json": dati_puliti
-            }).execute()
+            supabase.table("tracce_gpx").insert({"utente": utente, "nome": nome, "descrizione": descrizione, "visibile": visibile, "dati_json": dati_puliti}).execute()
         return True
     except Exception as e:
-        st.error(f"Errore di salvataggio GPX cloud: {e}")
+        st.error(f"Errore salvataggio GPX in cloud: {e}")
         return False
 
-def aggiorna_metadati_gpx(utente, nome, campo, valore):
+def rinomina_traccia_gpx(utente, vecchio_nome, nuovo_nome):
     try:
-        supabase.table("tracce_gpx").update({campo: valore}).eq("utente", utente).eq("nome", nome).execute()
+        res = supabase.table("tracce_gpx").select("id").eq("utente", utente).eq("nome", vecchio_nome).execute()
+        if res.data:
+            supabase.table("tracce_gpx").update({"nome": nuovo_nome}).eq("id", res.data[0]["id"]).execute()
+            return True
+        return False
     except Exception as e:
-        st.error(f"Errore aggiornamento {campo}: {e}")
+        st.error(f"Errore rinomina db: {e}")
+        return False
+
+@st.cache_data(ttl=30)
+def fetch_community_tracks():
+    try:
+        res = supabase.table("tracce_gpx").select("*").execute()
+        shared = [row for row in res.data if row.get("dati_json", {}).get("condivisa", False)]
+        shared.sort(key=lambda x: x.get("dati_json", {}).get("data_svolgimento", ""), reverse=True)
+        return shared
+    except:
+        return []
 
 def autosave_quick_edit():
     nuovo_stato = st.session_state.quick_edit_selectbox
@@ -297,18 +301,16 @@ st.sidebar.markdown("""
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
         <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato. Radar esplorazione attivo!</li>
         <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
-        <li><b>GPX:</b> Importa, analizza e visualizza le tue tracce cloud.</li>
+        <li><b>GPX & Community:</b> Archivio personale delle tracce e condivisione pubblica con gli altri utenti.</li>
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 4.2 beta<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 5.2 (Community & Mobile)<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 if "dati_caricati" not in st.session_state:
     stati_cloud = fetch_stati_dal_db(st.session_state.profilo_attivo)
-    
-    # Carica le tracce GPX salvate nel Cloud per questo utente
     st.session_state.tracce_gpx = carica_tracce_gpx_cloud(st.session_state.profilo_attivo)
     
     if os.path.exists("bivacchi_vda.geojson") and os.path.exists("rifugi_vda.geojson"):
@@ -337,14 +339,11 @@ dizionario_strutture = {
 mappa_bivacchi = st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'].isin(stati_selezionati)]
 mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].isin(stati_selezionati)]
 
-# ==========================================
-# UI TABS
-# ==========================================
-tab_mappa, tab_registri, tab_gpx = st.tabs(["🗺️ Esplora & Pianifica", "📊 Registri Strutture", "📂 Archivio GPX"])
+tab_mappa, tab_registri, tab_gpx, tab_community = st.tabs(["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX", "🌐 Community"])
 
 with tab_gpx:
-    st.subheader("📂 Il tuo Archivio GPX")
-    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud. Potrai gestirne la visibilità in mappa, analizzarne le quote e aggiungere descrizioni.")
+    st.subheader("📂 Il tuo Archivio GPX Personale")
+    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud in modo permanente. Rinomina, descrivi e scegli se condividerli con la Community.")
     
     if "tracce_gpx" in st.session_state and st.session_state.tracce_gpx:
         st.info(f"📊 **Totale Tracce nel tuo archivio:** {len(st.session_state.tracce_gpx)}")
@@ -355,15 +354,12 @@ with tab_gpx:
         for uploaded_gpx in uploaded_files:
             content = uploaded_gpx.getvalue()
             if len(content) > 0:
-                base_nome = uploaded_gpx.name
+                base_nome = uploaded_gpx.name.replace(".gpx", "")
                 
-                # Evita elaborazioni inutili se già in memoria
                 if base_nome not in st.session_state.tracce_gpx:
                     try:
-                        try:
-                            gpx_string = content.decode('utf-8')
-                        except UnicodeDecodeError:
-                            gpx_string = content.decode('ISO-8859-1')
+                        try: gpx_string = content.decode('utf-8')
+                        except UnicodeDecodeError: gpx_string = content.decode('ISO-8859-1')
                         
                         gpx = gpxpy.parse(gpx_string)
                         pts, quote, d_pos, d_neg, dist = [], [], 0, 0, 0
@@ -382,31 +378,30 @@ with tab_gpx:
                                             else: d_neg += abs(diff)
                                     last_pt = p
                         
-                        dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata"}
+                        dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata", "condivisa": False}
                         
-                        st.session_state.tracce_gpx[base_nome] = {
-                            "descrizione": "",
-                            "visibile": True,
-                            "dati": dati_gpx
-                        }
-                        
-                        # Salvataggio nel database Supabase
+                        st.session_state.tracce_gpx[base_nome] = {"descrizione": "", "visibile": True, "dati": dati_gpx}
                         salva_traccia_gpx(st.session_state.profilo_attivo, base_nome, "", True, dati_gpx)
                         st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"Errore decodifica GPX {base_nome}: {e}")
+                    except Exception as e: st.error(f"Errore decodifica GPX {base_nome}: {e}")
 
     st.markdown("---")
     
-    # Rendering dell'elenco espandibile per le tracce caricate in cloud
     if st.session_state.get("tracce_gpx"):
         for nome_traccia, info in list(st.session_state.tracce_gpx.items()):
             stato_traccia = info["dati"].get("stato", "Pianificata")
             icona_stato = "✅" if stato_traccia == "Svolta" else "⏳"
             
             with st.expander(f"{icona_stato} 🗺️ {nome_traccia}", expanded=False):
-                c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                c_ren, c_btn = st.columns([3, 1])
+                nuovo_nome = c_ren.text_input("Nuovo nome traccia:", value=nome_traccia, key=f"ren_{nome_traccia}", label_visibility="collapsed")
+                if c_btn.button("✏️ Rinomina", key=f"btn_ren_{nome_traccia}", use_container_width=True):
+                    if nuovo_nome != nome_traccia and nuovo_nome.strip() != "":
+                        if rinomina_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, nuovo_nome):
+                            st.session_state.tracce_gpx[nuovo_nome] = st.session_state.tracce_gpx.pop(nome_traccia)
+                            st.rerun()
+                
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Distanza", f"{info['dati']['dist']} km")
                 c2.metric("Dislivello +", f"D+ {info['dati']['d_pos']} m")
                 c3.metric("Dislivello -", f"D- {info['dati']['d_neg']} m")
@@ -414,34 +409,108 @@ with tab_gpx:
                 visibile = c4.toggle("Mostra in Mappa", value=info.get("visibile", True), key=f"vis_{nome_traccia}")
                 if visibile != info.get("visibile", True):
                     st.session_state.tracce_gpx[nome_traccia]["visibile"] = visibile
-                    aggiorna_metadati_gpx(st.session_state.profilo_attivo, nome_traccia, "visibile", visibile)
+                    salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info.get("descrizione", ""), visibile, info["dati"])
                     st.rerun()
 
                 c_stato, c_desc = st.columns([1, 2])
                 with c_stato:
-                    nuovo_stato = st.selectbox("Stato Traccia:", ["Pianificata", "Svolta"], index=0 if stato_traccia=="Pianificata" else 1, key=f"stato_{nome_traccia}")
+                    nuovo_stato = st.selectbox("Stato Personale:", ["Pianificata", "Svolta"], index=0 if stato_traccia=="Pianificata" else 1, key=f"stato_{nome_traccia}")
                     if nuovo_stato != stato_traccia:
                         st.session_state.tracce_gpx[nome_traccia]["dati"]["stato"] = nuovo_stato
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info.get("descrizione", ""), info.get("visibile", True), st.session_state.tracce_gpx[nome_traccia]["dati"])
                         st.rerun()
 
                 with c_desc:
-                    desc = st.text_area("Descrizione della traccia:", value=info.get("descrizione", ""), key=f"desc_{nome_traccia}", label_visibility="collapsed")
+                    desc = st.text_area("Appunti Personali:", value=info.get("descrizione", ""), key=f"desc_{nome_traccia}", label_visibility="collapsed")
                     if desc != info.get("descrizione", ""):
                         st.session_state.tracce_gpx[nome_traccia]["descrizione"] = desc
-                        aggiorna_metadati_gpx(st.session_state.profilo_attivo, nome_traccia, "descrizione", desc)
+                        salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, desc, info.get("visibile", True), info["dati"])
+
+                st.markdown("---")
+                st.markdown("#### 🌐 Condivisione Community")
+                is_shared = info["dati"].get("condivisa", False)
+                condivisa_toggle = st.toggle("Condividi questa traccia pubblicamente", value=is_shared, key=f"share_{nome_traccia}")
+                
+                if condivisa_toggle:
+                    sd = info["dati"].get("data_svolgimento")
+                    def_date = datetime.strptime(sd, "%Y-%m-%d").date() if sd else datetime.today().date()
+                    data_sv = st.date_input("Data svolgimento:", value=def_date, key=f"date_{nome_traccia}")
+                    
+                    lista_strutture = list(dizionario_strutture.keys())
+                    strutture_visitate = st.multiselect("Strutture visitate in questo giro:", options=lista_strutture, default=info["dati"].get("strutture_visitate", []), key=f"strut_{nome_traccia}")
+                    
+                    desc_pubblica = st.text_area("Racconto o info utili per la Community:", value=info["dati"].get("descrizione_pubblica", ""), key=f"desc_pub_{nome_traccia}")
+                    
+                    if st.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary"):
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = True
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["data_svolgimento"] = data_sv.strftime("%Y-%m-%d")
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["strutture_visitate"] = strutture_visitate
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["descrizione_pubblica"] = desc_pubblica
+                        salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
+                        st.success("Condivisione aggiornata con successo!")
+                else:
+                    if is_shared:
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = False
+                        salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
+                        st.rerun()
 
                 if info["dati"].get("quote"):
                     fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
                     if fig_gpx: st.plotly_chart(fig_gpx, use_container_width=True)
                     
-                if st.button("❌ Elimina definitivamente", key=f"del_{nome_traccia}", type="secondary"):
+                if st.button("❌ Elimina definitivamente la traccia", key=f"del_{nome_traccia}"):
                     try:
                         supabase.table("tracce_gpx").delete().eq("utente", st.session_state.profilo_attivo).eq("nome", nome_traccia).execute()
                         del st.session_state.tracce_gpx[nome_traccia]
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore eliminazione dal database: {e}")
+                    except Exception as e: st.error(f"Errore eliminazione: {e}")
+
+with tab_community:
+    st.subheader("🌐 Feed Tracce della Community")
+    st.markdown("Esplora gli itinerari completati e condivisi pubblicamente dagli altri esploratori.")
+    
+    with st.spinner("Caricamento tracce condivise..."):
+        tracce_feed = fetch_community_tracks()
+        
+        if not tracce_feed:
+            st.info("Nessuna traccia condivisa al momento. Sii il primo a condividerne una dal tuo Archivio GPX!")
+        else:
+            for t in tracce_feed:
+                dati = t.get("dati_json", {})
+                with st.container(border=True):
+                    st.markdown(f"<h3 style='color: #0055ff; margin-bottom:0;'>🚶‍♂️ {t['nome']}</h3>", unsafe_allow_html=True)
+                    st.markdown(f"**Esploratore:** `{t['utente']}` | 📅 **Data:** `{dati.get('data_svolgimento', 'N/D')}`")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Distanza", f"{dati.get('dist', 0)} km")
+                    c2.metric("Dislivello +", f"D+ {dati.get('d_pos', 0)} m")
+                    c3.metric("Dislivello -", f"D- {dati.get('d_neg', 0)} m")
+                    
+                    desc_pub = dati.get("descrizione_pubblica", "")
+                    if desc_pub:
+                        # FIX: Colore dinamico tramite rgba (funziona sia su dark mode che su light mode)
+                        st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px;'>{desc_pub}</div>", unsafe_allow_html=True)
+                    
+                    strutture = dati.get("strutture_visitate", [])
+                    if strutture:
+                        st.markdown(f"<br>⛺ **Strutture Toccate:** " + ", ".join([f"`{s}`" for s in strutture]), unsafe_allow_html=True)
+                    
+                    if dati.get("quote"):
+                        fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria dell'itinerario")
+                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, use_container_width=True)
+                    
+                    if dati.get("points"):
+                        lats = [p[0] for p in dati['points']]
+                        lons = [p[1] for p in dati['points']]
+                        fig_map = go.Figure(go.Scattermapbox(lat=lats, lon=lons, mode="lines", line=dict(width=4, color="#e63946")))
+                        fig_map.update_layout(
+                            mapbox_style="open-street-map",
+                            mapbox_center={"lat": sum(lats)/len(lats), "lon": sum(lons)/len(lons)},
+                            mapbox_zoom=10,
+                            margin={"r":0,"t":0,"l":0,"b":0},
+                            height=300
+                        )
+                        st.plotly_chart(fig_map, use_container_width=True)
 
 with tab_mappa:
     with st.container(border=True):
@@ -479,8 +548,7 @@ with tab_mappa:
             if meta.get('quote'):
                 if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, use_container_width=True)
             
-            c1, c2 = st.columns(2)
-            c1.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", use_container_width=True)
+            st.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", use_container_width=True)
 
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
@@ -493,6 +561,7 @@ with tab_mappa:
         n, q, a, s = get_val(row, "name_it"), get_val(row, "ele"), get_val(row, "accesso"), get_val(row, "stato_visita", "Non visitato")
         link = get_val(row, "link1_href", "#")
         desc = get_val(row, "desc_it", "")
+        
         lat, lon = row.geometry.y, row.geometry.x
         meteo_url = f"https://www.meteoblue.com/it/tempo/settimana/{round(lat, 4)}N{round(lon, 4)}E"
         
@@ -518,25 +587,16 @@ with tab_mappa:
     if st.session_state.get("itinerario_attivo"):
         folium.GeoJson(st.session_state.itinerario_attivo['geometry'], style_function=lambda x: {'color': '#0055ff', 'weight': 5, 'opacity': 0.9}, name="📍 Traccia Calcolata").add_to(m)
 
-    # Render Multiple GPX Tracks from Cloud Session
     if "tracce_gpx" in st.session_state:
-        colori_gpx = ["#8e44ad", "#e74c3c", "#3498db", "#16a085", "#d35400", "#c0392b"]
-        idx_colore = 0
+        colori_gpx = ["#8e44ad", "#e74c3c", "#3498db", "#16a085", "#d35400"]
+        idx_col = 0
         for nome_traccia, info in st.session_state.tracce_gpx.items():
             if info.get("visibile", True):
-                colore = colori_gpx[idx_colore % len(colori_gpx)]
+                colore = colori_gpx[idx_col % len(colori_gpx)]
                 stato_t = info["dati"].get("stato", "Pianificata")
-                folium.PolyLine(
-                    locations=info["dati"]["points"], 
-                    color=colore, 
-                    weight=5, 
-                    opacity=0.8, 
-                    tooltip=f"GPX: {nome_traccia} ({stato_t})", 
-                    name=nome_traccia
-                ).add_to(m)
-                idx_colore += 1
+                folium.PolyLine(locations=info["dati"]["points"], color=colore, weight=5, opacity=0.8, tooltip=f"GPX: {nome_traccia} ({stato_t})", name=nome_traccia).add_to(m)
+                idx_col += 1
 
-    # Indicatori Partenza/Tappa/Arrivo
     for k, ic, col in [("partenza", "🛫", "#0055ff"), ("arrivo", "🛬", "#ff0000")]:
         if node := st.session_state.itinerario_struttura.get(k):
             folium.Marker([node[1], node[2]], tooltip=f"{k.upper()}: {node[0]}", icon=folium.DivIcon(html=f"<div style='background:{col}; width:45px; height:45px; border-radius:50%; border:3px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size:22px; color:white;'>{ic}</div>", icon_size=(45, 45), icon_anchor=(22, 22))).add_to(m)
@@ -547,27 +607,31 @@ with tab_mappa:
     for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
 
-    # FIX LEGENDA: Color forced to #333 and #000 to prevent invisible text
     legend_template = """
     {% macro html(this, kwargs) %}
-    <div style="position: fixed; bottom: 30px; left: 30px; width: 220px; z-index: 99999; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; pointer-events: auto;">
-        <b style="font-size: 14px; display: block; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; color: #000;">🗺️ Legenda</b>
-        <div style="margin-bottom: 8px;">
-            <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tracciati</span>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #e65c00; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Sentiero</span></div>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #8c564b; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Sterrata</span></div>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #2ca02c; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Pedonale</span></div>
-        </div>
-        <div style="margin-bottom: 8px;">
-            <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Strutture</span>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">⛺</div><span style="color: #333;">Bivacco</span></div>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">🏠</div><span style="color: #333;">Rifugio</span></div>
-        </div>
-        <div>
-            <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Stato Visita</span>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #28a745; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Visitato</span></div>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #ffc107; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Pianificato</span></div>
-            <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #dc3545; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Non visitato</span></div>
+    <div style="position: fixed; bottom: 30px; left: 30px; z-index: 99999; pointer-events: auto;">
+        <button onclick="var el=document.getElementById('legenda-mappa-vda'); el.style.display=(el.style.display==='none')?'block':'none';" style="background-color: white; border: 2px solid #ccc; padding: 8px 15px; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-weight: bold; font-family: sans-serif; font-size: 14px; color: #333; display: flex; align-items: center; justify-content: center;">
+            🗺️ Legenda
+        </button>
+        <div id="legenda-mappa-vda" style="display: none; margin-top: 10px; width: 220px; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; color: #333;">
+            <b style="font-size: 14px; display: block; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; color: #000;">Dettagli</b>
+            <div style="margin-bottom: 8px;">
+                <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tracciati</span>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #e65c00; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Sentiero</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #8c564b; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Sterrata</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #2ca02c; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Pedonale</span></div>
+            </div>
+            <div style="margin-bottom: 8px;">
+                <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Strutture</span>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">⛺</div><span style="color: #333;">Bivacco</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">🏠</div><span style="color: #333;">Rifugio</span></div>
+            </div>
+            <div>
+                <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Stato Visita</span>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #28a745; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Visitato</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #ffc107; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Pianificato</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><span style="background: #dc3545; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Non visitato</span></div>
+            </div>
         </div>
     </div>
     {% endmacro %}
@@ -643,7 +707,6 @@ with tab_mappa:
 with tab_registri:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
     
-    # KPI DASHBOARD (Indented properly)
     tot_biv = len(st.session_state.bivacchi)
     vis_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Visitato'])
     plan_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Pianificato'])
@@ -654,29 +717,27 @@ with tab_registri:
     
     st.markdown(f"""
     <div style="display: flex; gap: 20px; margin-bottom: 20px;">
-        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top: 0; text-align: center; color: #333;">⛺ Riepilogo Bivacchi</h4>
+        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top: 0; text-align: center;">⛺ Riepilogo Bivacchi</h4>
             <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_biv}</b><br><span style="color:#555;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_biv}</b><br><span style="color:#555;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_biv}</b><br><span style="color:#555;">Pianificati</span></div>
+                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_biv}</b><br><span style="font-size: 13px;">Totali</span></div>
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_biv}</b><br><span style="font-size: 13px;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_biv}</b><br><span style="font-size: 13px;">Pianificati</span></div>
             </div>
         </div>
-        <div style="flex: 1; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top: 0; text-align: center; color: #333;">🏠 Riepilogo Rifugi</h4>
+        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top: 0; text-align: center;">🏠 Riepilogo Rifugi</h4>
             <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_rif}</b><br><span style="color:#555;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_rif}</b><br><span style="color:#555;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_rif}</b><br><span style="color:#555;">Pianificati</span></div>
+                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_rif}</b><br><span style="font-size: 13px;">Totali</span></div>
+                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_rif}</b><br><span style="font-size: 13px;">Visitati</span></div>
+                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_rif}</b><br><span style="font-size: 13px;">Pianificati</span></div>
             </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    # Colonne in minuscolo standardizzato
     colonne_desiderate = ["name_it", "ele", "accesso", "stato_visita"]
-    cb = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns]
-    cr = [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
+    cb, cr = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns], [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
 
     col1, col2 = st.columns(2)
     with col1:
