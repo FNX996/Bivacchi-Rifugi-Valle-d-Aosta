@@ -16,7 +16,13 @@ import plotly.graph_objects as go
 from datetime import datetime
 import json
 from supabase import create_client, Client
+from PIL import Image
+import io
+import uuid
 
+# ==========================================
+# CONFIGURAZIONE PAGINA E STILI
+# ==========================================
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
 
 st.markdown("""
@@ -30,6 +36,9 @@ st.markdown("""
 
 st.title("Esplorazione e Pianificazione VdA 🏔️")
 
+# ==========================================
+# CONNESSIONE A SUPABASE CLOUD DB
+# ==========================================
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
@@ -42,6 +51,9 @@ except Exception as e:
     st.error(f"Errore di connessione a Supabase: Verifica i Secrets. Dettaglio: {e}")
     st.stop()
 
+# ==========================================
+# FUNZIONI GLOBALI E METEO
+# ==========================================
 def calcola_distanza_haversine(lon1, lat1, lon2, lat2):
     R = 6371.0 
     dLat, dLon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
@@ -98,43 +110,6 @@ def calcola_profilo_dtm(traccia_coordinate, dtm_path):
         return valori_quota, int(disl_pos), int(disl_neg)
     except: return [], 0, 0
 
-@st.cache_resource(show_spinner=False)
-def prepara_motore_routing(_gdf):
-    G = nx.Graph()
-    for _, row in _gdf.iterrows():
-        if row.geometry is None: continue
-        lines = [row.geometry] if row.geometry.geom_type == 'LineString' else row.geometry.geoms if row.geometry.geom_type == 'MultiLineString' else []
-        for line in lines:
-            coords = list(line.coords)
-            for i in range(len(coords)-1):
-                p1, p2 = coords[i], coords[i+1]
-                G.add_edge(p1, p2, weight=calcola_distanza_haversine(p1[0], p1[1], p2[0], p2[1]))
-    
-    nodi_lista = list(G.nodes())
-    if not nodi_lista: return None, None, None
-    albero = cKDTree(nodi_lista)
-    
-    pairs = albero.query_pairs(r=0.00027) # Snapping a 30m circa
-    for i, j in pairs:
-        n1, n2 = nodi_lista[i], nodi_lista[j]
-        if not G.has_edge(n1, n2):
-            G.add_edge(n1, n2, weight=calcola_distanza_haversine(n1[0], n1[1], n2[0], n2[1]))
-            
-    return G, nodi_lista, albero
-
-def calcola_percorso_locale(G, albero, nodi, punti_coords):
-    try:
-        traccia_totale, distanza_km = [], 0.0
-        for i in range(len(punti_coords)-1):
-            nodo1 = nodi[albero.query((punti_coords[i][1], punti_coords[i][0]))[1]]
-            nodo2 = nodi[albero.query((punti_coords[i+1][1], punti_coords[i+1][0]))[1]]
-            path = nx.astar_path(G, source=nodo1, target=nodo2, heuristic=euristica_astar, weight='weight')
-            distanza_km += sum(G[path[j]][path[j+1]]['weight'] for j in range(len(path)-1))
-            traccia_totale.extend(path if i == 0 else path[1:])
-            
-        return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
-    except nx.NetworkXNoPath: return None
-
 def fetch_profili_esistenti():
     try: return sorted([row['utente'] for row in supabase.table("utenti_credenziali").select("utente").execute().data if row.get('utente')])
     except: return []
@@ -163,6 +138,30 @@ def genera_gpx(coordinate_geometria, nome_itinerario="Itinerario VdA"):
     gpx.extend(['    </trkseg>', '  </trk>', '</gpx>'])
     return "\n".join(gpx)
 
+def comprimi_e_salva_foto(file_uploader_objects):
+    urls = []
+    for file in file_uploader_objects:
+        try:
+            img = Image.open(file)
+            if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+            
+            # Compressione e Resize intelligente per limitare il peso a ~150KB
+            img.thumbnail((1024, 1024))
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='JPEG', quality=75)
+            img_bytes = img_byte_arr.getvalue()
+            
+            nome_file = f"{uuid.uuid4().hex}.jpg"
+            
+            # Caricamento nel Bucket
+            supabase.storage.from_("foto_tracce").upload(path=nome_file, file=img_bytes, file_options={"content-type": "image/jpeg"})
+            
+            url_pubblico = supabase.storage.from_("foto_tracce").get_public_url(nome_file)
+            urls.append(url_pubblico)
+        except Exception as e:
+            st.error(f"Errore caricamento foto {file.name}: {e}")
+    return urls
+
 def carica_tracce_gpx_cloud(utente):
     try:
         res = supabase.table("tracce_gpx").select("*").eq("utente", utente).execute()
@@ -189,7 +188,7 @@ def salva_traccia_gpx(utente, nome, descrizione, visibile, dati_json):
             supabase.table("tracce_gpx").insert({"utente": utente, "nome": nome, "descrizione": descrizione, "visibile": visibile, "dati_json": dati_puliti}).execute()
         return True
     except Exception as e:
-        st.error(f"Errore salvataggio GPX in cloud: {e}")
+        st.error(f"Errore salvataggio GPX in cloud: {e}. Controlla lo sblocco RLS su Supabase.")
         return False
 
 def rinomina_traccia_gpx(utente, vecchio_nome, nuovo_nome):
@@ -238,6 +237,43 @@ def sync_tables_cloud(df_name, editor_key):
                 records.append({"nome_struttura": df.loc[row_idx, "name_it"], "stato": nuovo_stato, "utente": st.session_state.profilo_attivo})
         if records: supabase.table("stato_visite").upsert(records).execute()
 
+@st.cache_resource(show_spinner=False)
+def prepara_motore_routing(_gdf):
+    G = nx.Graph()
+    for _, row in _gdf.iterrows():
+        if row.geometry is None: continue
+        lines = [row.geometry] if row.geometry.geom_type == 'LineString' else row.geometry.geoms if row.geometry.geom_type == 'MultiLineString' else []
+        for line in lines:
+            coords = list(line.coords)
+            for i in range(len(coords)-1):
+                p1, p2 = coords[i], coords[i+1]
+                G.add_edge(p1, p2, weight=calcola_distanza_haversine(p1[0], p1[1], p2[0], p2[1]))
+    
+    nodi_lista = list(G.nodes())
+    if not nodi_lista: return None, None, None
+    albero = cKDTree(nodi_lista)
+    
+    pairs = albero.query_pairs(r=0.00027)
+    for i, j in pairs:
+        n1, n2 = nodi_lista[i], nodi_lista[j]
+        if not G.has_edge(n1, n2):
+            G.add_edge(n1, n2, weight=calcola_distanza_haversine(n1[0], n1[1], n2[0], n2[1]))
+            
+    return G, nodi_lista, albero
+
+def calcola_percorso_locale(G, albero, nodi, punti_coords):
+    try:
+        traccia_totale, distanza_km = [], 0.0
+        for i in range(len(punti_coords)-1):
+            nodo1 = nodi[albero.query((punti_coords[i][1], punti_coords[i][0]))[1]]
+            nodo2 = nodi[albero.query((punti_coords[i+1][1], punti_coords[i+1][0]))[1]]
+            path = nx.astar_path(G, source=nodo1, target=nodo2, heuristic=euristica_astar, weight='weight')
+            distanza_km += sum(G[path[j]][path[j+1]]['weight'] for j in range(len(path)-1))
+            traccia_totale.extend(path if i == 0 else path[1:])
+            
+        return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
+    except nx.NetworkXNoPath: return None
+
 if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", use_container_width=True)
 
 st.sidebar.markdown("### 👤 Profilo Utente")
@@ -246,6 +282,7 @@ lista_profili = fetch_profili_esistenti()
 if "autenticato" not in st.session_state: st.session_state.autenticato = False
 if "itinerario_struttura" not in st.session_state: st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
 
+# Ricerca predittiva del profilo
 profilo_input = st.sidebar.text_input("Cerca o digita il tuo profilo:")
 
 if profilo_input:
@@ -301,11 +338,11 @@ st.sidebar.markdown("""
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
         <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato. Radar esplorazione attivo!</li>
         <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
-        <li><b>GPX & Community:</b> Archivio personale delle tracce e condivisione pubblica con gli altri utenti.</li>
+        <li><b>GPX & Community:</b> Archivio tracce e condivisione pubblica con foto.</li>
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 5.2 (Community & Mobile)<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 7.0 (Galleria Cloud)<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
@@ -341,9 +378,12 @@ mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].i
 
 tab_mappa, tab_registri, tab_gpx, tab_community = st.tabs(["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX", "🌐 Community"])
 
+# ==========================================
+# TAB 3: ARCHIVIO GPX
+# ==========================================
 with tab_gpx:
     st.subheader("📂 Il tuo Archivio GPX Personale")
-    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud in modo permanente. Rinomina, descrivi e scegli se condividerli con la Community.")
+    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud in modo permanente. Rinomina, descrivi e scegli se condividerli con la Community (anche con Foto!).")
     
     if "tracce_gpx" in st.session_state and st.session_state.tracce_gpx:
         st.info(f"📊 **Totale Tracce nel tuo archivio:** {len(st.session_state.tracce_gpx)}")
@@ -378,7 +418,7 @@ with tab_gpx:
                                             else: d_neg += abs(diff)
                                     last_pt = p
                         
-                        dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata", "condivisa": False}
+                        dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata", "condivisa": False, "foto": []}
                         
                         st.session_state.tracce_gpx[base_nome] = {"descrizione": "", "visibile": True, "dati": dati_gpx}
                         salva_traccia_gpx(st.session_state.profilo_attivo, base_nome, "", True, dati_gpx)
@@ -427,7 +467,7 @@ with tab_gpx:
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, desc, info.get("visibile", True), info["dati"])
 
                 st.markdown("---")
-                st.markdown("#### 🌐 Condivisione Community")
+                st.markdown("#### 🌐 Condivisione Community & Foto")
                 is_shared = info["dati"].get("condivisa", False)
                 condivisa_toggle = st.toggle("Condividi questa traccia pubblicamente", value=is_shared, key=f"share_{nome_traccia}")
                 
@@ -441,13 +481,35 @@ with tab_gpx:
                     
                     desc_pubblica = st.text_area("Racconto o info utili per la Community:", value=info["dati"].get("descrizione_pubblica", ""), key=f"desc_pub_{nome_traccia}")
                     
-                    if st.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary"):
-                        st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = True
-                        st.session_state.tracce_gpx[nome_traccia]["dati"]["data_svolgimento"] = data_sv.strftime("%Y-%m-%d")
-                        st.session_state.tracce_gpx[nome_traccia]["dati"]["strutture_visitate"] = strutture_visitate
-                        st.session_state.tracce_gpx[nome_traccia]["dati"]["descrizione_pubblica"] = desc_pubblica
+                    # Upload Fotografie
+                    foto_caricate = st.file_uploader("Aggiungi foto alla traccia (Max 1024px automatico)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True, key=f"foto_{nome_traccia}")
+                    foto_esistenti = info["dati"].get("foto", [])
+                    if foto_esistenti:
+                        st.caption(f"📸 {len(foto_esistenti)} foto attualmente condivise.")
+
+                    c_agg, c_del = st.columns([3, 1])
+                    if c_agg.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary", use_container_width=True):
+                        with st.spinner("Salvataggio e caricamento foto in corso (potrebbe volerci qualche istante)..."):
+                            nuove_foto_urls = []
+                            if foto_caricate:
+                                nuove_foto_urls = comprimi_e_salva_foto(foto_caricate)
+                            
+                            tutte_le_foto = foto_esistenti + nuove_foto_urls
+                            
+                            st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = True
+                            st.session_state.tracce_gpx[nome_traccia]["dati"]["data_svolgimento"] = data_sv.strftime("%Y-%m-%d")
+                            st.session_state.tracce_gpx[nome_traccia]["dati"]["strutture_visitate"] = strutture_visitate
+                            st.session_state.tracce_gpx[nome_traccia]["dati"]["descrizione_pubblica"] = desc_pubblica
+                            st.session_state.tracce_gpx[nome_traccia]["dati"]["foto"] = tutte_le_foto
+                            
+                            salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
+                            st.success("Condivisione e foto aggiornate con successo!")
+                            st.rerun()
+
+                    if foto_esistenti and c_del.button("🗑️ Rimuovi Foto", key=f"btn_del_foto_{nome_traccia}", use_container_width=True):
+                        st.session_state.tracce_gpx[nome_traccia]["dati"]["foto"] = []
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
-                        st.success("Condivisione aggiornata con successo!")
+                        st.rerun()
                 else:
                     if is_shared:
                         st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = False
@@ -465,9 +527,12 @@ with tab_gpx:
                         st.rerun()
                     except Exception as e: st.error(f"Errore eliminazione: {e}")
 
+# ==========================================
+# TAB 4: COMMUNITY
+# ==========================================
 with tab_community:
     st.subheader("🌐 Feed Tracce della Community")
-    st.markdown("Esplora gli itinerari completati e condivisi pubblicamente dagli altri esploratori.")
+    st.markdown("Esplora gli itinerari, i racconti e le foto condivise pubblicamente dagli altri esploratori.")
     
     with st.spinner("Caricamento tracce condivise..."):
         tracce_feed = fetch_community_tracks()
@@ -479,7 +544,7 @@ with tab_community:
                 dati = t.get("dati_json", {})
                 with st.container(border=True):
                     st.markdown(f"<h3 style='color: #0055ff; margin-bottom:0;'>🚶‍♂️ {t['nome']}</h3>", unsafe_allow_html=True)
-                    st.markdown(f"**Esploratore:** `{t['utente']}` | 📅 **Data:** `{dati.get('data_svolgimento', 'N/D')}`")
+                    st.markdown(f"**Esploratore:** <span style='color:#28a745; font-weight:bold;'>{t['utente']}</span> | 📅 **Data:** `{dati.get('data_svolgimento', 'N/D')}`", unsafe_allow_html=True)
                     
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Distanza", f"{dati.get('dist', 0)} km")
@@ -488,13 +553,23 @@ with tab_community:
                     
                     desc_pub = dati.get("descrizione_pubblica", "")
                     if desc_pub:
-                        # FIX: Colore dinamico tramite rgba (funziona sia su dark mode che su light mode)
-                        st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px;'>{desc_pub}</div>", unsafe_allow_html=True)
+                        # Fix per la visibilità del testo su Dark e Light mode (sfondo semi-trasparente e testo di default)
+                        st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px; color:inherit;'>{desc_pub}</div>", unsafe_allow_html=True)
                     
                     strutture = dati.get("strutture_visitate", [])
                     if strutture:
-                        st.markdown(f"<br>⛺ **Strutture Toccate:** " + ", ".join([f"`{s}`" for s in strutture]), unsafe_allow_html=True)
+                        st.markdown(f"<br>⛺ **Strutture Toccate:** " + ", ".join([f"<span style='color:#16a085; font-weight:bold;'>{s}</span>" for s in strutture]), unsafe_allow_html=True)
                     
+                    # Galleria Fotografica a Miniature Espandibili
+                    foto_urls = dati.get("foto", [])
+                    if foto_urls:
+                        st.markdown("<br>📸 **Galleria Fotografica:** <span style='font-size: 12px; color: #888;'>(Clicca sulle foto per ingrandirle)</span>", unsafe_allow_html=True)
+                        # Usiamo 5 colonne in modo che le foto rimangano piccole miniature
+                        cols = st.columns(5)
+                        for i, url in enumerate(foto_urls):
+                            with cols[i % 5]:
+                                st.image(url, use_container_width=True)
+
                     if dati.get("quote"):
                         fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria dell'itinerario")
                         if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, use_container_width=True)
@@ -512,6 +587,9 @@ with tab_community:
                         )
                         st.plotly_chart(fig_map, use_container_width=True)
 
+# ==========================================
+# TAB 1: MAPPA E ITINERARI
+# ==========================================
 with tab_mappa:
     with st.container(border=True):
         st.subheader("🧭 Pianificatore Itinerario")
@@ -704,6 +782,9 @@ with tab_mappa:
             url_gulliver = f"https://www.gulliver.it/?s={n_cliccato.replace(' ', '+')}" if clk_t else "https://www.gulliver.it/itinerari/?paese=italia&regione=valle-daosta"
             st.link_button("🏔️ Cerca su Gulliver", url=url_gulliver, use_container_width=True)
 
+# ==========================================
+# TAB 2: REGISTRI DATABASE
+# ==========================================
 with tab_registri:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
     

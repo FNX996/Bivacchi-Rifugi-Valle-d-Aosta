@@ -10,3 +10,4 @@ shapely
 rasterio
 gpxpy
 plotly
+Pillow
