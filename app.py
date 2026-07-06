@@ -116,12 +116,20 @@ def fetch_profili_esistenti():
 
 def verifica_password(utente, password_inserita):
     try:
-        res = supabase.table("utenti_credenziali").select("password").eq("utente", utente).execute()
-        return res.data and res.data[0]["password"] == password_inserita
-    except: return False
+        res = supabase.table("utenti_credenziali").select("*").eq("utente", utente).execute()
+        if res.data and res.data[0]["password"] == password_inserita:
+            # Ritorna anche il dato sul PIN per capire se va aggiornato
+            return True, res.data[0].get("pin_recupero")
+        return False, None
+    except: return False, None
 
-def registra_nuovo_utente(utente, password):
-    try: return supabase.table("utenti_credenziali").insert({"utente": utente, "password": password}).execute() is not None
+def registra_nuovo_utente(utente, password, pin):
+    try: 
+        return supabase.table("utenti_credenziali").insert({
+            "utente": utente, 
+            "password": password,
+            "pin_recupero": pin
+        }).execute() is not None
     except: return False
 
 def fetch_stati_dal_db(utente):
@@ -282,50 +290,118 @@ lista_profili = fetch_profili_esistenti()
 if "autenticato" not in st.session_state: st.session_state.autenticato = False
 if "itinerario_struttura" not in st.session_state: st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
 
-# Ricerca predittiva del profilo
-profilo_input = st.sidebar.text_input("Cerca o digita il tuo profilo:")
+tab_login, tab_reg = st.sidebar.tabs(["🔑 Accedi", "📝 Registrati"])
 
-if profilo_input:
-    match = [p for p in lista_profili if p.lower().startswith(profilo_input.lower())]
-    if match:
-        scelta = st.sidebar.radio("Profili trovati:", match)
-        if st.sidebar.button("Accedi con questo profilo"):
-            st.session_state.scelta_profilo_widget = scelta
-            st.session_state.creazione_in_corso = False
+with tab_login:
+    # Ricerca predittiva del profilo
+    profilo_input = st.text_input("Cerca o digita il tuo profilo:")
+
+    if profilo_input:
+        match = [p for p in lista_profili if p.lower().startswith(profilo_input.lower())]
+        if match:
+            scelta = st.radio("Profili trovati:", match)
             st.session_state.profilo_attivo = scelta
-            st.session_state.autenticato = False
-            if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
-            st.rerun()
-    else:
-        st.sidebar.info("Profilo non trovato. Vuoi crearne uno nuovo?")
-        if st.sidebar.button("➕ Crea Nuovo Profilo"):
-            st.session_state.scelta_profilo_widget = "➕ Crea Nuovo Profilo..."
-            st.session_state.creazione_in_corso = True
+        else:
+            st.info("Profilo non trovato.")
             st.session_state.profilo_attivo = None
-            st.rerun()
 
-if st.session_state.get("profilo_attivo") and not st.session_state.autenticato:
-    if pwd := st.sidebar.text_input(f"Inserisci la password per {st.session_state.profilo_attivo}:", type="password", key="pass_field"):
-        if verifica_password(st.session_state.profilo_attivo, pwd):
-            st.session_state.autenticato = True
-            st.toast("🔓 Accesso eseguito!", icon="🔑")
-            st.rerun()
-        else: st.sidebar.error("❌ Password errata!")
+    if st.session_state.get("profilo_attivo") and not st.session_state.autenticato:
+        if pwd := st.text_input(f"Inserisci la password per {st.session_state.profilo_attivo}:", type="password", key="pass_field"):
+            valido, pin_esistente = verifica_password(st.session_state.profilo_attivo, pwd)
+            if valido:
+                # Controlla se il vecchio utente deve impostare il PIN
+                if not pin_esistente:
+                    st.warning("⚠️ Aggiornamento di Sicurezza")
+                    st.markdown("Per proteggere il tuo account, imposta un PIN Segreto per il recupero della password.")
+                    nuovo_pin = st.text_input("Scegli un PIN Segreto", type="password", key="new_pin_upgrade")
+                    if st.button("Salva PIN e Accedi"):
+                        if nuovo_pin:
+                            supabase.table("utenti_credenziali").update({"pin_recupero": nuovo_pin}).eq("utente", st.session_state.profilo_attivo).execute()
+                            st.session_state.autenticato = True
+                            st.success("PIN salvato! Accesso eseguito.")
+                            st.rerun()
+                        else:
+                            st.error("Inserisci un PIN valido.")
+                else:
+                    st.session_state.autenticato = True
+                    st.toast("🔓 Accesso eseguito!", icon="🔑")
+                    st.rerun()
+            else: st.error("❌ Password errata!")
 
-if st.session_state.get("creazione_in_corso"):
-    nome_nuovo = st.sidebar.text_input("Nome del nuovo utente:", placeholder="Nome completo...")
-    password_nuova = st.sidebar.text_input("Imposta una password:", type="password", placeholder="Password...")
-    if nome_nuovo.strip() and password_nuova.strip() and st.sidebar.button("Inizializza Profilo"):
-        p_fmt = nome_nuovo.strip().title()
-        if p_fmt in lista_profili: st.sidebar.error("❌ Profilo già esistente!")
-        elif registra_nuovo_utente(p_fmt, password_nuova.strip()):
-            st.session_state.profilo_attivo, st.session_state.autenticato, st.session_state.creazione_in_corso = p_fmt, True, False
-            if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
-            st.rerun()
+    # Modulo di recupero password
+    with st.expander("Hai dimenticato la password?"):
+        st.markdown("Reimposta la tua password usando il tuo PIN segreto.")
+        rec_nome = st.text_input("Nome del Profilo da recuperare")
+        rec_pin = st.text_input("Il tuo PIN segreto", type="password")
+        rec_nuova_pass = st.text_input("Scegli una Nuova Password", type="password")
+        
+        if st.button("Reimposta Password"):
+            if rec_nome and rec_pin and rec_nuova_pass:
+                try:
+                    response = supabase.table("utenti_credenziali").select("*").eq("utente", rec_nome).eq("pin_recupero", rec_pin).execute()
+                    if len(response.data) > 0:
+                        supabase.table("utenti_credenziali").update({"password": rec_nuova_pass}).eq("utente", rec_nome).execute()
+                        st.success("Password aggiornata con successo! Ora puoi fare il login.")
+                    else:
+                        st.error("Nome profilo o PIN segreto errati.")
+                except Exception as e:
+                    st.error("Errore durante il recupero.")
+            else:
+                st.warning("Compila tutti i campi per reimpostare la password.")
 
+with tab_reg:
+    st.markdown("### Crea un nuovo profilo")
+    nome_nuovo = st.text_input("Nome Profilo", placeholder="Nome completo...")
+    password_nuova = st.text_input("Imposta una password", type="password")
+    pin_sicurezza = st.text_input("PIN Segreto (serve per recuperare la password!)", type="password")
+    
+    if st.button("Inizializza Profilo"):
+        if nome_nuovo.strip() and password_nuova.strip() and pin_sicurezza.strip():
+            p_fmt = nome_nuovo.strip().title()
+            if p_fmt in lista_profili: 
+                st.error("❌ Profilo già esistente!")
+            elif registra_nuovo_utente(p_fmt, password_nuova.strip(), pin_sicurezza.strip()):
+                st.session_state.profilo_attivo, st.session_state.autenticato = p_fmt, True
+                if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
+                st.success("Profilo creato! Ora sei loggato.")
+                st.rerun()
+        else:
+            st.error("Compila tutti i campi, incluso il PIN di sicurezza.")
+
+# Se non è autenticato, ferma qui il rendering della pagina principale
 if not st.session_state.get("profilo_attivo") or not st.session_state.autenticato:
     st.info("👈 Digita il tuo profilo per accedere o creane uno nuovo.")
     st.stop()
+
+# Controlla che l'utente sia loggato per mostrare impostazioni account
+if st.session_state.get("autenticato"):
+    st.sidebar.divider()
+    with st.sidebar.expander("⚙️ Impostazioni Account"):
+        st.markdown("**Cambio Password**")
+        vecchia_pwd = st.text_input("Password attuale", type="password")
+        nuova_pwd = st.text_input("Nuova password", type="password")
+        if st.button("Aggiorna Password", use_container_width=True):
+            if verifica_password(st.session_state.profilo_attivo, vecchia_pwd)[0]:
+                supabase.table("utenti_credenziali").update({"password": nuova_pwd}).eq("utente", st.session_state.profilo_attivo).execute()
+                st.success("Password aggiornata!")
+            else:
+                st.error("Password attuale errata.")
+        
+        st.divider()
+        st.markdown("**Zona Pericolosa**")
+        # Checkbox di conferma per evitare cancellazioni accidentali
+        conferma_eliminazione = st.checkbox("Sono sicuro di voler eliminare il mio profilo e i miei dati.")
+        if st.button("🗑️ Elimina Profilo Definitivamente", type="primary", disabled=not conferma_eliminazione, use_container_width=True):
+            try:
+                # Cancella il profilo dalla tabella utenti
+                supabase.table("utenti_credenziali").delete().eq("utente", st.session_state.profilo_attivo).execute()
+                
+                # Pulisci la sessione e riavvia l'app
+                st.session_state.clear()
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Errore durante l'eliminazione: {e}")
 
 st.sidebar.markdown("---")
 stati_disponibili = ["Non visitato", "Pianificato", "Visitato"]
@@ -341,10 +417,18 @@ st.sidebar.markdown("""
         <li><b>GPX & Community:</b> Archivio tracce e condivisione pubblica con foto.</li>
     </ul>
 </div>
-<div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 7.0 (Galleria Cloud)<br>Autore: Nori Fabrizio
+<div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 7.1<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
+
+with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
+    st.markdown("""
+    **Versione 7.1**
+    * ⚙️ **Impostazioni:** Nuovo menù raggruppato per cambio password ed eliminazione profilo.
+    * ⚡ **Mappa fluida:** Bottone dedicato sotto la mappa per attivare/disattivare i sentieri pesanti, rendendo il rendering istantaneo.
+    * 👏 **Kudos Community:** Aggiunto il pulsante 'Applaudi' per interagire e supportare le tracce pubbliche degli altri esploratori!
+    """)
 
 if "dati_caricati" not in st.session_state:
     stati_cloud = fetch_stati_dal_db(st.session_state.profilo_attivo)
@@ -518,7 +602,7 @@ with tab_gpx:
 
                 if info["dati"].get("quote"):
                     fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
-                    if fig_gpx: st.plotly_chart(fig_gpx, use_container_width=True)
+                    if fig_gpx: st.plotly_chart(fig_gpx, use_container_width=True, key=f"plot_gpx_{nome_traccia}")
                     
                 if st.button("❌ Elimina definitivamente la traccia", key=f"del_{nome_traccia}"):
                     try:
@@ -553,7 +637,7 @@ with tab_community:
                     
                     desc_pub = dati.get("descrizione_pubblica", "")
                     if desc_pub:
-                        # Fix per la visibilità del testo su Dark e Light mode (sfondo semi-trasparente e testo di default)
+                        # Fix per la visibilità del testo su Dark e Light mode
                         st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px; color:inherit;'>{desc_pub}</div>", unsafe_allow_html=True)
                     
                     strutture = dati.get("strutture_visitate", [])
@@ -564,7 +648,6 @@ with tab_community:
                     foto_urls = dati.get("foto", [])
                     if foto_urls:
                         st.markdown("<br>📸 **Galleria Fotografica:** <span style='font-size: 12px; color: #888;'>(Clicca sulle foto per ingrandirle)</span>", unsafe_allow_html=True)
-                        # Usiamo 5 colonne in modo che le foto rimangano piccole miniature
                         cols = st.columns(5)
                         for i, url in enumerate(foto_urls):
                             with cols[i % 5]:
@@ -572,7 +655,7 @@ with tab_community:
 
                     if dati.get("quote"):
                         fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria dell'itinerario")
-                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, use_container_width=True)
+                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, use_container_width=True, key=f"plot_comm_{t.get('id', uuid.uuid4().hex)}")
                     
                     if dati.get("points"):
                         lats = [p[0] for p in dati['points']]
@@ -585,7 +668,26 @@ with tab_community:
                             margin={"r":0,"t":0,"l":0,"b":0},
                             height=300
                         )
-                        st.plotly_chart(fig_map, use_container_width=True)
+                        st.plotly_chart(fig_map, use_container_width=True, key=f"map_comm_{t.get('id', uuid.uuid4().hex)}")
+
+                    # Sistema di Kudos / Applausi
+                    st.divider()
+                    kudos = dati.get("kudos", [])
+                    has_kudo = st.session_state.profilo_attivo in kudos
+                    c_kudo, _ = st.columns([1, 3])
+                    with c_kudo:
+                        kudo_label = f"🎉 Applaudito ({len(kudos)})" if has_kudo else f"👏 Applaudi ({len(kudos)})"
+                        if st.button(kudo_label, key=f"kudo_{t.get('id', t['nome'])}", use_container_width=True):
+                            if has_kudo:
+                                kudos.remove(st.session_state.profilo_attivo)
+                            else:
+                                kudos.append(st.session_state.profilo_attivo)
+                            dati["kudos"] = kudos
+                            try:
+                                supabase.table("tracce_gpx").update({"dati_json": dati}).eq("id", t["id"]).execute()
+                                st.rerun()
+                            except Exception as e:
+                                st.error("Errore nel salvataggio dell'applauso.")
 
 # ==========================================
 # TAB 1: MAPPA E ITINERARI
@@ -624,7 +726,7 @@ with tab_mappa:
         if meta := st.session_state.get("itinerario_metadati"):
             st.success(f"📈 **Distanza:** {meta['dist']} km | **D+** {meta['d_pos']} m / **D-** {meta['d_neg']} m | ⏱️ **Tempo Stimato:** {meta['tempo']}")
             if meta.get('quote'):
-                if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, use_container_width=True)
+                if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, use_container_width=True, key="plot_calc")
             
             st.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", use_container_width=True)
 
@@ -657,9 +759,11 @@ with tab_mappa:
         </div>
         """
 
-    if st.session_state.get("sentieri") is not None:
+    # MODIFICA PRESTAZIONI: Mostra sentieri SOLO se il toggle sotto la mappa è attivo
+    show_trails = st.session_state.get("mostra_sentieri_toggle", False)
+    if st.session_state.get("sentieri") is not None and show_trails:
         fg_s = folium.FeatureGroup(name="🥾 Rete Sentieristica", show=True)
-        folium.GeoJson(st.session_state.sentieri, style_function=lambda x: {'color': '#2ca02c' if x['properties'].get('fclass')=='footway' else '#e65c00', 'weight': 2, 'dashArray': '6, 6', 'opacity': 0.8}, tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['Nome:']) if 'name' in st.session_state.sentieri.columns else None).add_to(fg_s)
+        folium.GeoJson(st.session_state.sentieri, style_function=lambda x: {'color': '#2ca02c' if x['properties'].get('fclass')=='footway' else '#e65c00', 'weight': 2, 'dashArray': '6, 6', 'opacity': 0.8}).add_to(fg_s)
         fg_s.add_to(m)
 
     if st.session_state.get("itinerario_attivo"):
@@ -721,6 +825,11 @@ with tab_mappa:
     folium.LayerControl(position='topright').add_to(m)
 
     map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
+
+    # Toggle per i sentieri posizionato in modo evidente sotto la mappa
+    st.markdown("---")
+    st.toggle("🕸️ Mostra Rete Sentieristica sulla Mappa", key="mostra_sentieri_toggle")
+    st.caption("💡 **Suggerimento:** Attiva la rete sentieristica solo quando vuoi esplorarla visivamente. Tenerla disattivata renderà la mappa fluida e i tuoi clic saranno istantanei!")
 
     n_cliccato, clk_t, clk_m = None, map_data.get("last_object_clicked_tooltip"), map_data.get("last_clicked")
     
