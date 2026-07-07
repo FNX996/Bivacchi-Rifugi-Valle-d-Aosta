@@ -282,7 +282,7 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
         return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
     except nx.NetworkXNoPath: return None
 
-if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", use_container_width=True)
+if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", width="stretch")
 
 st.sidebar.markdown("### 👤 Profilo Utente")
 lista_profili = fetch_profili_esistenti()
@@ -380,7 +380,7 @@ if st.session_state.get("autenticato"):
         st.markdown("**Cambio Password**")
         vecchia_pwd = st.text_input("Password attuale", type="password")
         nuova_pwd = st.text_input("Nuova password", type="password")
-        if st.button("Aggiorna Password", use_container_width=True):
+        if st.button("Aggiorna Password", width="stretch"):
             if verifica_password(st.session_state.profilo_attivo, vecchia_pwd)[0]:
                 supabase.table("utenti_credenziali").update({"password": nuova_pwd}).eq("utente", st.session_state.profilo_attivo).execute()
                 st.success("Password aggiornata!")
@@ -391,7 +391,7 @@ if st.session_state.get("autenticato"):
         st.markdown("**Zona Pericolosa**")
         # Checkbox di conferma per evitare cancellazioni accidentali
         conferma_eliminazione = st.checkbox("Sono sicuro di voler eliminare il mio profilo e i miei dati.")
-        if st.button("🗑️ Elimina Profilo Definitivamente", type="primary", disabled=not conferma_eliminazione, use_container_width=True):
+        if st.button("🗑️ Elimina Profilo Definitivamente", type="primary", disabled=not conferma_eliminazione, width="stretch"):
             try:
                 # Cancella il profilo dalla tabella utenti
                 supabase.table("utenti_credenziali").delete().eq("utente", st.session_state.profilo_attivo).execute()
@@ -519,7 +519,7 @@ with tab_gpx:
             with st.expander(f"{icona_stato} 🗺️ {nome_traccia}", expanded=False):
                 c_ren, c_btn = st.columns([3, 1])
                 nuovo_nome = c_ren.text_input("Nuovo nome traccia:", value=nome_traccia, key=f"ren_{nome_traccia}", label_visibility="collapsed")
-                if c_btn.button("✏️ Rinomina", key=f"btn_ren_{nome_traccia}", use_container_width=True):
+                if c_btn.button("✏️ Rinomina", key=f"btn_ren_{nome_traccia}", width="stretch"):
                     if nuovo_nome != nome_traccia and nuovo_nome.strip() != "":
                         if rinomina_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, nuovo_nome):
                             st.session_state.tracce_gpx[nuovo_nome] = st.session_state.tracce_gpx.pop(nome_traccia)
@@ -572,7 +572,7 @@ with tab_gpx:
                         st.caption(f"📸 {len(foto_esistenti)} foto attualmente condivise.")
 
                     c_agg, c_del = st.columns([3, 1])
-                    if c_agg.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary", use_container_width=True):
+                    if c_agg.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary", width="stretch"):
                         with st.spinner("Salvataggio e caricamento foto in corso (potrebbe volerci qualche istante)..."):
                             nuove_foto_urls = []
                             if foto_caricate:
@@ -590,7 +590,7 @@ with tab_gpx:
                             st.success("Condivisione e foto aggiornate con successo!")
                             st.rerun()
 
-                    if foto_esistenti and c_del.button("🗑️ Rimuovi Foto", key=f"btn_del_foto_{nome_traccia}", use_container_width=True):
+                    if foto_esistenti and c_del.button("🗑️ Rimuovi Foto", key=f"btn_del_foto_{nome_traccia}", width="stretch"):
                         st.session_state.tracce_gpx[nome_traccia]["dati"]["foto"] = []
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
                         st.rerun()
@@ -602,7 +602,7 @@ with tab_gpx:
 
                 if info["dati"].get("quote"):
                     fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
-                    if fig_gpx: st.plotly_chart(fig_gpx, use_container_width=True, key=f"plot_gpx_{nome_traccia}")
+                    if fig_gpx: st.plotly_chart(fig_gpx, width="stretch", key=f"plot_gpx_{nome_traccia}")
                     
                 if st.button("❌ Elimina definitivamente la traccia", key=f"del_{nome_traccia}"):
                     try:
@@ -651,11 +651,11 @@ with tab_community:
                         cols = st.columns(5)
                         for i, url in enumerate(foto_urls):
                             with cols[i % 5]:
-                                st.image(url, use_container_width=True)
+                                st.image(url, width="stretch")
 
                     if dati.get("quote"):
                         fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria dell'itinerario")
-                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, use_container_width=True, key=f"plot_comm_{t.get('id', uuid.uuid4().hex)}")
+                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, width="stretch", key=f"plot_comm_{t.get('id', uuid.uuid4().hex)}")
                     
                     if dati.get("points"):
                         lats = [p[0] for p in dati['points']]
@@ -668,7 +668,7 @@ with tab_community:
                             margin={"r":0,"t":0,"l":0,"b":0},
                             height=300
                         )
-                        st.plotly_chart(fig_map, use_container_width=True, key=f"map_comm_{t.get('id', uuid.uuid4().hex)}")
+                        st.plotly_chart(fig_map, width="stretch", key=f"map_comm_{t.get('id', uuid.uuid4().hex)}")
 
                     # Sistema di Kudos / Applausi
                     st.divider()
@@ -677,7 +677,7 @@ with tab_community:
                     c_kudo, _ = st.columns([1, 3])
                     with c_kudo:
                         kudo_label = f"🎉 Applaudito ({len(kudos)})" if has_kudo else f"👏 Applaudi ({len(kudos)})"
-                        if st.button(kudo_label, key=f"kudo_{t.get('id', t['nome'])}", use_container_width=True):
+                        if st.button(kudo_label, key=f"kudo_{t.get('id', t['nome'])}", width="stretch"):
                             if has_kudo:
                                 kudos.remove(st.session_state.profilo_attivo)
                             else:
@@ -705,7 +705,7 @@ with tab_mappa:
         
         c_calc, c_reset = st.columns([2, 1])
         with c_calc:
-            if st.button("🔄 Calcola Tracciato", type="primary", use_container_width=True):
+            if st.button("🔄 Calcola Tracciato", type="primary", width="stretch"):
                 if len(punti_it) >= 2 and grafo_motore:
                     with st.spinner("Calcolo rotta ultrarapido..."):
                         if rotta := calcola_percorso_locale(grafo_motore, albero_motore, nodi_motore, [(p[1], p[2]) for p in punti_it]):
@@ -718,7 +718,7 @@ with tab_mappa:
                 elif not grafo_motore: st.error("Rete escursionistica mancante.")
                 else: st.warning("Inserisci Partenza e Arrivo.")
         with c_reset:
-            if st.button("🗑️ Svuota Tutto", use_container_width=True):
+            if st.button("🗑️ Svuota Tutto", width="stretch"):
                 st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
                 for k in ["itinerario_attivo", "itinerario_metadati"]: st.session_state.pop(k, None)
                 st.rerun()
@@ -726,9 +726,9 @@ with tab_mappa:
         if meta := st.session_state.get("itinerario_metadati"):
             st.success(f"📈 **Distanza:** {meta['dist']} km | **D+** {meta['d_pos']} m / **D-** {meta['d_neg']} m | ⏱️ **Tempo Stimato:** {meta['tempo']}")
             if meta.get('quote'):
-                if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, use_container_width=True, key="plot_calc")
+                if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, width="stretch", key="plot_calc")
             
-            st.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", use_container_width=True)
+            st.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", width="stretch")
 
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
@@ -759,7 +759,6 @@ with tab_mappa:
         </div>
         """
 
-    # MODIFICA PRESTAZIONI: Mostra sentieri SOLO se il toggle sotto la mappa è attivo
     show_trails = st.session_state.get("mostra_sentieri_toggle", False)
     if st.session_state.get("sentieri") is not None and show_trails:
         fg_s = folium.FeatureGroup(name="🥾 Rete Sentieristica", show=True)
@@ -850,9 +849,9 @@ with tab_mappa:
         with ci:
             st.markdown(f"### 📍 `{n_cliccato}` (Quota: {round(q_n)}m)")
             cp, ct, ca = st.columns(3)
-            if cp.button("🛫 Partenza", use_container_width=True): st.session_state.itinerario_struttura["partenza"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
-            if ct.button("🛑 Tappa", use_container_width=True) and (n_cliccato, lat_n, lon_n, q_n) not in st.session_state.itinerario_struttura["tappe"]: st.session_state.itinerario_struttura["tappe"].append((n_cliccato, lat_n, lon_n, q_n)); st.rerun()
-            if ca.button("🛬 Arrivo", use_container_width=True): st.session_state.itinerario_struttura["arrivo"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
+            if cp.button("🛫 Partenza", width="stretch"): st.session_state.itinerario_struttura["partenza"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
+            if ct.button("🛑 Tappa", width="stretch") and (n_cliccato, lat_n, lon_n, q_n) not in st.session_state.itinerario_struttura["tappe"]: st.session_state.itinerario_struttura["tappe"].append((n_cliccato, lat_n, lon_n, q_n)); st.rerun()
+            if ca.button("🛬 Arrivo", width="stretch"): st.session_state.itinerario_struttura["arrivo"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
 
             if clk_t:
                 st.session_state.struttura_attiva = clk_t
@@ -883,13 +882,13 @@ with tab_mappa:
             st.markdown("#### 🌐 Smart Links Community")
             bb_offset = 0.02
             url_wikiloc = f"https://it.wikiloc.com/percorsi/outdoor?t=&d=&lfr=&lto=&a=outdoor&q=&s=id&f=&u=0&k=1&m=&p=&act=&n=&c=&map={lat_n-bb_offset},{lon_n-bb_offset},{lat_n+bb_offset},{lon_n+bb_offset},4&rd=1"
-            st.link_button("🟢 Cerca in area su Wikiloc", url=url_wikiloc, use_container_width=True)
+            st.link_button("🟢 Cerca in area su Wikiloc", url=url_wikiloc, width="stretch")
             
             url_komoot = f"https://www.komoot.com/it-it/discover/Location/@{lat_n},{lon_n}/tours?sport=hike"
-            st.link_button("🌲 Cerca in area su Komoot", url=url_komoot, use_container_width=True)
+            st.link_button("🌲 Cerca in area su Komoot", url=url_komoot, width="stretch")
             
             url_gulliver = f"https://www.gulliver.it/?s={n_cliccato.replace(' ', '+')}" if clk_t else "https://www.gulliver.it/itinerari/?paese=italia&regione=valle-daosta"
-            st.link_button("🏔️ Cerca su Gulliver", url=url_gulliver, use_container_width=True)
+            st.link_button("🏔️ Cerca su Gulliver", url=url_gulliver, width="stretch")
 
 # ==========================================
 # TAB 2: REGISTRI DATABASE
@@ -932,7 +931,7 @@ with tab_registri:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### ⛺ Bivacchi")
-        st.data_editor(st.session_state.bivacchi[cb], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, use_container_width=True, hide_index=True, key="editor_b", on_change=lambda: sync_tables_cloud("bivacchi", "editor_b"))
+        st.data_editor(st.session_state.bivacchi[cb], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, width="stretch", hide_index=True, key="editor_b", on_change=lambda: sync_tables_cloud("bivacchi", "editor_b"))
     with col2:
         st.markdown("### 🏠 Rifugi")
-        st.data_editor(st.session_state.rifugi[cr], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, use_container_width=True, hide_index=True, key="editor_r", on_change=lambda: sync_tables_cloud("rifugi", "editor_r"))
+        st.data_editor(st.session_state.rifugi[cr], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, width="stretch", hide_index=True, key="editor_r", on_change=lambda: sync_tables_cloud("rifugi", "editor_r"))
