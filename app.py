@@ -265,6 +265,7 @@ def prepara_motore_routing(_gdf):
     if not nodi_lista: return None, None, None
     albero = cKDTree(nodi_lista)
     
+    # Saldatura topologica locale con KDTree
     pairs = albero.query_pairs(r=0.00027)
     for i, j in pairs:
         n1, n2 = nodi_lista[i], nodi_lista[j]
@@ -479,6 +480,7 @@ with tab_gpx:
     uploaded_files = st.file_uploader("Trascina o seleziona una o più tracce .gpx", type=["gpx"], accept_multiple_files=True)
 
     if uploaded_files:
+        tracce_aggiunte = False
         for uploaded_gpx in uploaded_files:
             content = uploaded_gpx.getvalue()
             if len(content) > 0:
@@ -506,12 +508,24 @@ with tab_gpx:
                                             else: d_neg += abs(diff)
                                     last_pt = p
                         
+                        # Downsampling intelligente per evitare il crash del database e della memoria browser
+                        max_punti = 300
+                        if len(pts) > max_punti:
+                            step = len(pts) // max_punti
+                            pts = pts[::step]
+                            if quote:
+                                quote = quote[::step]
+
                         dati_gpx = {"points": pts, "quote": quote, "dist": round(dist, 2), "d_pos": round(d_pos), "d_neg": round(d_neg), "stato": "Pianificata", "condivisa": False, "foto": []}
                         
                         st.session_state.tracce_gpx[base_nome] = {"descrizione": "", "visibile": True, "dati": dati_gpx}
                         salva_traccia_gpx(st.session_state.profilo_attivo, base_nome, "", True, dati_gpx)
-                        st.rerun()
+                        tracce_aggiunte = True
                     except Exception as e: st.error(f"Errore decodifica GPX {base_nome}: {e}")
+        
+        # Ricarichiamo la pagina SOLO al termine di tutto il ciclo di upload
+        if tracce_aggiunte:
+            st.rerun()
 
     st.markdown("---")
     
@@ -664,6 +678,7 @@ with tab_community:
                     if dati.get("points"):
                         lats = [p[0] for p in dati['points']]
                         lons = [p[1] for p in dati['points']]
+                        # Uso corretto di Scattermap aggiornato (elimina i warning di Plotly 2026)
                         fig_map = go.Figure(go.Scattermap(lat=lats, lon=lons, mode="lines", line=dict(width=4, color="#e63946")))
                         fig_map.update_layout(
                             map_style="open-street-map",
