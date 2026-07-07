@@ -19,6 +19,10 @@ from supabase import create_client, Client
 from PIL import Image
 import io
 import uuid
+import warnings
+
+# Ignoriamo i warning innocui di Geopandas/Pyogrio sugli ID duplicati nei GeoJSON
+warnings.filterwarnings("ignore", message=".*Several features with id.*")
 
 # ==========================================
 # CONFIGURAZIONE PAGINA E STILI
@@ -660,11 +664,11 @@ with tab_community:
                     if dati.get("points"):
                         lats = [p[0] for p in dati['points']]
                         lons = [p[1] for p in dati['points']]
-                        fig_map = go.Figure(go.Scattermapbox(lat=lats, lon=lons, mode="lines", line=dict(width=4, color="#e63946")))
+                        fig_map = go.Figure(go.Scattermap(lat=lats, lon=lons, mode="lines", line=dict(width=4, color="#e63946")))
                         fig_map.update_layout(
-                            mapbox_style="open-street-map",
-                            mapbox_center={"lat": sum(lats)/len(lats), "lon": sum(lons)/len(lons)},
-                            mapbox_zoom=10,
+                            map_style="open-street-map",
+                            map_center={"lat": sum(lats)/len(lats), "lon": sum(lons)/len(lons)},
+                            map_zoom=10,
                             margin={"r":0,"t":0,"l":0,"b":0},
                             height=300
                         )
