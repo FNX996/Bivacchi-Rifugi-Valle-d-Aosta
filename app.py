@@ -7,6 +7,7 @@ from streamlit_folium import st_folium
 import os
 import requests
 import math
+import numpy as np
 import networkx as nx
 from scipy.spatial import cKDTree
 import rasterio
@@ -21,7 +22,7 @@ import io
 import uuid
 import warnings
 
-# Ignoriamo i warning innocui di Geopandas/Pyogrio sugli ID duplicati nei GeoJSON
+# Ignoriamo i warning innocui di Geopandas/Pyogrio
 warnings.filterwarnings("ignore", message=".*Several features with id.*")
 
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
@@ -104,6 +105,143 @@ def calcola_profilo_dtm(traccia_coordinate, dtm_path):
         disl_neg = sum(max(0, valori_quota[i] - valori_quota[i+1]) for i in range(len(valori_quota) - 1))
         return valori_quota, int(disl_pos), int(disl_neg)
     except: return [], 0, 0
+
+def genera_superficie_3d(lats, lons, dtm_path, padding=0.015, max_resolution=60):
+    """Estrae e ricampiona un bounding box del DTM per generare una superficie 3D leggera"""
+    try:
+        min_lat, max_lat = min(lats) - padding, max(lats) + padding
+        min_lon, max_lon = min(lons) - padding, max(lons) + padding
+        
+        with rasterio.open(dtm_path) as src:
+            py1, px1 = src.index(min_lon, max_lat)
+            py2, px2 = src.index(max_lon, min_lat)
+            
+            px_min, px_max = max(0, min(px1, px2)), min(src.width, max(px1, px2))
+            py_min, py_max = max(0, min(py1, py2)), min(src.height, max(py1, py2))
+            
+            if px_max <= px_min or py_max <= py_min: return None
+            
+            window = rasterio.windows.Window(px_min, py_min, px_max - px_min, py_max - py_min)
+            data = src.read(1, window=window)
+            
+            # Gestione nodata e valori anomali
+            if src.nodata is not None:
+                data = np.where(data == src.nodata, np.nan, data)
+            data = np.where(data < 0, 0, data)
+            
+            # Downsampling aggressivo per evitare il crash del browser nel render 3D
+            step_y = max(1, data.shape[0] // max_resolution)
+            step_x = max(1, data.shape[1] // max_resolution)
+            
+            data_small = data[::step_y, ::step_x]
+            
+            grid_lons = np.linspace(min_lon, max_lon, data_small.shape[1])
+            grid_lats = np.linspace(max_lat, min_lat, data_small.shape[0])
+            
+            return grid_lons, grid_lats, data_small
+    except Exception as e:
+        return None
+
+@st.dialog("🚁 Esploratore 3D Interattivo", width="large")
+def open_3d_viewer(points, quote, nome):
+    if not points or not quote or len(points) != len(quote):
+        st.error("Dati insufficienti per generare il 3D (mancano le quote o sono corrotte).")
+        return
+        
+    dists = [0.0]
+    raw_slopes = [0.0]
+    for i in range(1, len(points)):
+        d = calcola_distanza_haversine(points[i-1][1], points[i-1][0], points[i][1], points[i][0])
+        dists.append(dists[-1] + d)
+        delta_h = quote[i] - quote[i-1]
+        slope = (delta_h / (d * 1000)) * 100 if d > 0.005 else 0.0
+        raw_slopes.append(max(min(slope, 60.0), -60.0))
+        
+    slopes = []
+    for i in range(len(raw_slopes)):
+        start, end = max(0, i-2), min(len(raw_slopes), i+3)
+        window = raw_slopes[start:end]
+        slopes.append(sum(window)/len(window))
+        
+    st.markdown(f"### {nome}")
+    
+    idx = st.slider("Scorri il percorso", 0, len(points)-1, 0, label_visibility="collapsed")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📍 Distanza", f"{dists[idx]:.2f} km")
+    c2.metric("⛰️ Altitudine", f"{int(quote[idx])} m")
+    c3.metric("📐 Pendenza", f"{slopes[idx]:.1f} %")
+    c4.metric("📈 Max Pendenza", f"{max(slopes):.1f} %")
+    
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    
+    fig = go.Figure()
+    
+    # Mappa del Terreno 3D (Se il DTM è disponibile)
+    dtm_path = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else "DTM_vda" if os.path.exists("DTM_vda") else None
+    if dtm_path:
+        with st.spinner("Generazione del modello del terreno in corso..."):
+            surface_data = genera_superficie_3d(lats, lons, dtm_path)
+            if surface_data:
+                grid_x, grid_y, z_data = surface_data
+                fig.add_trace(go.Surface(
+                    x=grid_x, y=grid_y, z=z_data,
+                    colorscale='Earth', 
+                    opacity=0.7, 
+                    showscale=False,
+                    name="Terreno",
+                    hoverinfo='none',
+                    lighting=dict(ambient=0.6, diffuse=0.8, roughness=0.5, specular=0.1)
+                ))
+    
+    # Traccia 3D colorata per pendenza
+    fig.add_trace(go.Scatter3d(
+        x=lons, y=lats, z=quote,
+        mode='lines',
+        line=dict(
+            color=slopes,
+            colorscale='RdYlGn_r',
+            cmin=-25, cmax=25,
+            width=8,
+            colorbar=dict(title="Pendenza %", x=-0.1)
+        ),
+        hoverinfo='none',
+        name="Tracciato"
+    ))
+    
+    # Indicatore di Posizione sferico
+    fig.add_trace(go.Scatter3d(
+        x=[lons[idx]], y=[lats[idx]], z=[quote[idx]],
+        mode='markers',
+        marker=dict(size=10, color='#0055ff', symbol='circle', line=dict(color='white', width=2)),
+        name="Posizione"
+    ))
+    
+    delta_lat, delta_lon, delta_ele = max(lats) - min(lats), max(lons) - min(lons), max(quote) - min(quote)
+    mean_lat = sum(lats) / len(lats)
+    x_meters = delta_lon * 111000 * math.cos(math.radians(mean_lat))
+    y_meters = delta_lat * 111000
+    z_meters = delta_ele
+    
+    max_range = max(x_meters, y_meters)
+    if max_range > 0:
+        ratio_x, ratio_y, ratio_z = x_meters / max_range, y_meters / max_range, (z_meters / max_range) * 2.0
+    else:
+        ratio_x, ratio_y, ratio_z = 1, 1, 0.5
+        
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='Longitudine', yaxis_title='Latitudine', zaxis_title='Quota (m)',
+            aspectratio=dict(x=ratio_x, y=ratio_y, z=ratio_z),
+            camera=dict(eye=dict(x=1.0, y=1.0, z=0.8))
+        ),
+        margin=dict(l=0, r=0, b=0, t=0),
+        height=500,
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig, width="stretch", key=f"3d_plot_{uuid.uuid4().hex}")
 
 def fetch_profili_esistenti():
     try: return sorted([row['utente'] for row in supabase.table("utenti_credenziali").select("utente").execute().data if row.get('utente')])
@@ -210,20 +348,6 @@ def fetch_community_tracks():
     except:
         return []
 
-def fetch_feedback_admin():
-    try:
-        res = supabase.table("feedback_utenti").select("*").order("created_at", desc=True).execute()
-        return res.data
-    except:
-        return []
-
-def delete_feedback_admin(id_fb):
-    try:
-        supabase.table("feedback_utenti").delete().eq("id", id_fb).execute()
-        return True
-    except:
-        return False
-
 def autosave_quick_edit():
     nuovo_stato = st.session_state.quick_edit_selectbox
     struttura, profilo = st.session_state.struttura_attiva, st.session_state.profilo_attivo
@@ -249,6 +373,18 @@ def sync_tables_cloud(df_name, editor_key):
                 records.append({"nome_struttura": df.loc[row_idx, "name_it"], "stato": nuovo_stato, "utente": st.session_state.profilo_attivo})
         if records: supabase.table("stato_visite").upsert(records).execute()
 
+def fetch_feedback_admin():
+    try:
+        res = supabase.table("feedback_utenti").select("*").order("created_at", desc=True).execute()
+        return res.data
+    except: return []
+
+def delete_feedback_admin(id_fb):
+    try:
+        supabase.table("feedback_utenti").delete().eq("id", id_fb).execute()
+        return True
+    except: return False
+
 @st.cache_resource(show_spinner=False)
 def prepara_motore_routing(_gdf):
     G = nx.Graph()
@@ -265,7 +401,6 @@ def prepara_motore_routing(_gdf):
     if not nodi_lista: return None, None, None
     albero = cKDTree(nodi_lista)
     
-    # Saldatura topologica locale con KDTree
     pairs = albero.query_pairs(r=0.00027)
     for i, j in pairs:
         n1, n2 = nodi_lista[i], nodi_lista[j]
@@ -287,7 +422,7 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
         return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
     except nx.NetworkXNoPath: return None
 
-if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", use_container_width=True)
+if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", width="stretch")
 
 st.sidebar.markdown("### 👤 Profilo Utente")
 lista_profili = fetch_profili_esistenti()
@@ -397,21 +532,20 @@ if st.session_state.get("autenticato"):
                 st.rerun()
             except Exception as e:
                 st.error(f"Errore durante l'eliminazione: {e}")
-
-    with st.sidebar.expander("📣 Feedback & Suggerimenti"):
-        st.markdown("Hai trovato un bug o hai un'idea per migliorare l'app? Faccelo sapere!")
-        tipo_fb = st.selectbox("Tipo:", ["Suggerimento", "Problema/Bug", "Altro"])
-        testo_fb = st.text_area("Il tuo messaggio:")
+                
+    with st.sidebar.expander("📣 Feedback & Segnalazioni"):
+        st.markdown("Hai trovato un problema o hai un'idea?")
+        tipo_fb = st.selectbox("Tipo:", ["Problema/Bug", "Suggerimento", "Altro"])
+        testo_fb = st.text_area("Messaggio:")
         if st.button("Invia Messaggio", width="stretch"):
             if testo_fb:
                 try:
                     supabase.table("feedback_utenti").insert({"utente": st.session_state.profilo_attivo, "tipo": tipo_fb, "testo": testo_fb}).execute()
-                    st.success("Grazie! Il tuo feedback è stato inviato a Fabrizio.")
+                    st.success("Feedback inviato a Fabrizio! Grazie.")
                 except Exception as e:
-                    st.warning("Servizio DB temporaneamente non disponibile. Scrivici una mail!")
-                    st.markdown(f"[📩 Invia via Mail (Clicca qui)](mailto:feedback@vda-explorer.com?subject=Feedback:{tipo_fb}&body={testo_fb})")
+                    st.error("Errore di connessione al database.")
             else:
-                st.error("Il testo non può essere vuoto.")
+                st.warning("Scrivi un messaggio.")
 
 st.sidebar.markdown("---")
 stati_disponibili = ["Non visitato", "Pianificato", "Visitato"]
@@ -423,22 +557,23 @@ st.sidebar.markdown("""
     <h5 style="margin-top: 0; color: #f8fafc; font-size: 15px; font-weight: 600;">💡 Guida Rapida</h5>
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
         <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato. Radar esplorazione attivo!</li>
-        <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM. Salva la traccia in archivio.</li>
-        <li><b>GPX & Community:</b> Archivio tracce, modifica manuale e condivisione pubblica con foto.</li>
+        <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
+        <li><b>GPX & Community:</b> Archivio tracce, esploratore 3D interattivo e condivisione con foto.</li>
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 7.3<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 8.5<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 7.3**
-    * 👑 **Admin Mode:** Pannello nascosto per la gestione dei feedback utenti.
-    * ✏️ **Editor Tracce GPX:** Ora puoi inviare un tuo GPX sulla mappa, regolarlo e "snapparlo" ai sentieri ufficiali!
-    * 💾 **Salva Itinerario:** Puoi salvare nel tuo profilo le tracce create dalla mappa.
-    * 📣 **Feedback In-App:** Segnala bug o idee tramite l'apposito menu.
+    **Versione 8.5**
+    * 🌍 **Modello Terreno 3D:** L'esploratore 3D ora carica la reale orografia della montagna sotto il tuo tracciato!
+    * 🚀 **Scorciatoia 3D dalla Mappa:** Aggiunto un pannello speciale sotto la Mappa per lanciare subito il 3D su qualsiasi traccia caricata.
+    * 🚁 **Esploratore 3D V8:** Scopri altitudine e pendenza muovendo il cursore in un ambiente completamente interattivo.
+    * ✏️ **Editor Tracce Libero:** "Modifica su Mappa" ti permette di fondere una vecchia traccia alla rete ufficiale.
+    * 💾 **Salvataggio Istantaneo:** Salva gli itinerari calcolati direttamente nel Cloud.
     """)
 
 if "dati_caricati" not in st.session_state:
@@ -471,13 +606,11 @@ dizionario_strutture = {
 mappa_bivacchi = st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'].isin(stati_selezionati)]
 mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].isin(stati_selezionati)]
 
-# Controllo Admin
+# Controllo Admin per pannello nascosto
 is_admin = st.session_state.get("profilo_attivo", "").strip().lower() in ["fabrizio", "fabrizio nori", "nori fabrizio", "bizzietto"]
 
-# Tabs dinamici
 tabs_names = ["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX", "🌐 Community"]
-if is_admin:
-    tabs_names.append("👑 Pannello Admin")
+if is_admin: tabs_names.append("👑 Pannello Admin")
 
 tabs = st.tabs(tabs_names)
 tab_mappa, tab_registri, tab_gpx, tab_community = tabs[0], tabs[1], tabs[2], tabs[3]
@@ -485,12 +618,7 @@ tab_mappa, tab_registri, tab_gpx, tab_community = tabs[0], tabs[1], tabs[2], tab
 if is_admin:
     tab_admin = tabs[4]
     with tab_admin:
-        st.subheader("👑 Pannello di Controllo Riservato")
-        st.markdown("Benvenuto Fabrizio! Qui puoi leggere e gestire i feedback inviati dagli utenti.")
-        
-        if st.button("🔄 Ricarica Feedback", width="content"):
-            st.rerun()
-
+        st.subheader("👑 Pannello di Controllo Feedback")
         feedbacks = fetch_feedback_admin()
         
         if not feedbacks:
@@ -503,22 +631,19 @@ if is_admin:
                     c1.markdown(f"**Utente:** {fb.get('utente', 'Sconosciuto')} | **Tipo:** {fb.get('tipo', 'N/D')} | **Data:** {data_fb}")
                     c1.markdown(f"> *{fb.get('testo', '')}*")
                     
-                    if c2.button("🗑️ Segna Risolto (Elimina)", key=f"del_fb_{fb.get('id')}", width="stretch"):
+                    if c2.button("🗑️ Segna Risolto", key=f"del_fb_{fb.get('id')}", width="stretch"):
                         if delete_feedback_admin(fb.get("id")):
-                            st.toast("Feedback eliminato!", icon="✅")
+                            st.toast("Feedback archiviato!", icon="✅")
                             st.rerun()
-                        else:
-                            st.error("Errore durante l'eliminazione.")
 
 with tab_gpx:
     st.subheader("📂 Il tuo Archivio GPX Personale")
-    st.markdown("Carica i tuoi file GPX. Verranno salvati nel tuo profilo cloud in modo permanente. Rinomina, descrivi e scegli se condividerli con la Community (anche con Foto!).")
+    st.markdown("Carica i tuoi file GPX per comprimerli e salvarli permanentemente. Puoi anche **Inviarli alla Mappa** per agganciarli ai sentieri ufficiali ed esplorarli in **3D**.")
     
     if "tracce_gpx" in st.session_state and st.session_state.tracce_gpx:
         st.info(f"📊 **Totale Tracce nel tuo archivio:** {len(st.session_state.tracce_gpx)}")
     
     st.markdown("#### ⚙️ Impostazioni Caricamento GPX")
-    st.caption("Il calcolo dei chilometri e del dislivello viene effettuato con la massima precisione sui dati grezzi, per poi ottimizzare e salvare il file limitando i rallentamenti.")
     tipo_comp = st.radio(
         "Scegli il metodo di compressione file:",
         ["Distanza (1 punto ogni 25m)", "Distanza (1 punto ogni 50m)", "Bilanciato (Max 500 punti)", "Originale (Nessuna)"],
@@ -526,7 +651,7 @@ with tab_gpx:
         label_visibility="collapsed"
     )
 
-    uploaded_files = st.file_uploader("Trascina o seleziona una o più tracce .gpx", type=["gpx"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Trascina o seleziona tracce .gpx", type=["gpx"], accept_multiple_files=True)
 
     if uploaded_files:
         tracce_aggiunte = False
@@ -557,7 +682,7 @@ with tab_gpx:
                                             else: d_neg += abs(diff)
                                     last_pt = p
                         
-                        # Downsampling (ottimizzazione dati salvati su DB)
+                        # Processo di Downsampling
                         if "Distanza" in tipo_comp and len(pts) > 2:
                             soglia = 25 if "25m" in tipo_comp else 50
                             new_pts, new_quote = [pts[0]], [quote[0]] if quote else []
@@ -584,8 +709,7 @@ with tab_gpx:
                         tracce_aggiunte = True
                     except Exception as e: st.error(f"Errore decodifica GPX {base_nome}: {e}")
         
-        if tracce_aggiunte:
-            st.rerun()
+        if tracce_aggiunte: st.rerun()
 
     st.markdown("---")
     
@@ -595,45 +719,29 @@ with tab_gpx:
             icona_stato = "✅" if stato_traccia == "Svolta" else "⏳"
             
             with st.expander(f"{icona_stato} 🗺️ {nome_traccia}", expanded=False):
-                c_ren, c_btn = st.columns([3, 1])
+                # Rinomina e Modifica su Mappa
+                c_ren, c_btn, c_mod = st.columns([2, 1, 1])
                 nuovo_nome = c_ren.text_input("Nuovo nome traccia:", value=nome_traccia, key=f"ren_{nome_traccia}", label_visibility="collapsed")
                 if c_btn.button("✏️ Rinomina", key=f"btn_ren_{nome_traccia}", width="stretch"):
                     if nuovo_nome != nome_traccia and nuovo_nome.strip() != "":
                         if rinomina_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, nuovo_nome):
                             st.session_state.tracce_gpx[nuovo_nome] = st.session_state.tracce_gpx.pop(nome_traccia)
                             st.rerun()
+                            
+                if c_mod.button("✏️ Modifica su Mappa", key=f"edit_plan_{nome_traccia}", width="stretch"):
+                    pts = info["dati"].get("points", [])
+                    if len(pts) >= 2:
+                        start = (f"Inizio ({nome_traccia})", pts[0][0], pts[0][1], 0)
+                        end = (f"Fine ({nome_traccia})", pts[-1][0], pts[-1][1], 0)
+                        tappe = []
+                        if len(pts) > 40:
+                            step = len(pts) // 4
+                            for i in range(1, 4): tappe.append((f"Tappa {i} ({nome_traccia})", pts[i*step][0], pts[i*step][1], 0))
+                        st.session_state.itinerario_struttura = {"partenza": start, "tappe": tappe, "arrivo": end}
+                        st.toast("Traccia estratta! Vai alla Mappa per ricalcolarla sui sentieri ufficiali.", icon="🧭")
+                    else: st.error("Traccia troppo corta.")
                 
-                # Strumenti Traccia Avanzati (Editor su Mappa)
-                st.markdown("#### 🛠️ Strumenti Traccia")
-                c_mod, c_dl = st.columns(2)
-                with c_mod:
-                    if st.button("✏️ Modifica e Adatta su Mappa", key=f"edit_plan_{nome_traccia}", width="stretch"):
-                        pts = info["dati"].get("points", [])
-                        if len(pts) >= 2:
-                            # Prendiamo il primo, l'ultimo e un paio di punti centrali per abbozzare le tappe
-                            start = (f"Inizio ({nome_traccia})", pts[0][0], pts[0][1], 0)
-                            end = (f"Fine ({nome_traccia})", pts[-1][0], pts[-1][1], 0)
-                            tappe = []
-                            if len(pts) > 40:
-                                step = len(pts) // 4
-                                for i in range(1, 4):
-                                    tappe.append((f"Tappa {i} ({nome_traccia})", pts[i*step][0], pts[i*step][1], 0))
-                            st.session_state.itinerario_struttura = {"partenza": start, "tappe": tappe, "arrivo": end}
-                            st.toast("Traccia inviata al Pianificatore! Vai alla Mappa per ricalcolarla sui sentieri ufficiali.", icon="🧭")
-                        else:
-                            st.error("La traccia non ha abbastanza punti per essere modificata.")
-                
-                with c_dl:
-                    st.download_button(
-                        "📥 Scarica questo GPX", 
-                        data=genera_gpx([(p[1], p[0]) for p in info["dati"]["points"]], nome_traccia), 
-                        file_name=f"{nome_traccia}.gpx", 
-                        mime="application/gpx+xml", 
-                        key=f"dl_{nome_traccia}",
-                        width="stretch"
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
+                # Metriche
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Distanza", f"{info['dati']['dist']} km")
                 c2.metric("Dislivello +", f"D+ {info['dati']['d_pos']} m")
@@ -645,6 +753,7 @@ with tab_gpx:
                     salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info.get("descrizione", ""), visibile, info["dati"])
                     st.rerun()
 
+                # Stato Personale e Download
                 c_stato, c_desc = st.columns([1, 2])
                 with c_stato:
                     nuovo_stato = st.selectbox("Stato Personale:", ["Pianificata", "Svolta"], index=0 if stato_traccia=="Pianificata" else 1, key=f"stato_{nome_traccia}")
@@ -652,6 +761,9 @@ with tab_gpx:
                         st.session_state.tracce_gpx[nome_traccia]["dati"]["stato"] = nuovo_stato
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info.get("descrizione", ""), info.get("visibile", True), st.session_state.tracce_gpx[nome_traccia]["dati"])
                         st.rerun()
+                    
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.download_button("📥 Scarica GPX", data=genera_gpx([(p[1], p[0]) for p in info["dati"]["points"]], nome_traccia), file_name=f"{nome_traccia}.gpx", mime="application/gpx+xml", key=f"dl_{nome_traccia}", width="stretch")
 
                 with c_desc:
                     desc = st.text_area("Appunti Personali:", value=info.get("descrizione", ""), key=f"desc_{nome_traccia}", label_visibility="collapsed")
@@ -659,10 +771,18 @@ with tab_gpx:
                         st.session_state.tracce_gpx[nome_traccia]["descrizione"] = desc
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, desc, info.get("visibile", True), info["dati"])
 
+                # Profilo 2D e Bottone 3D
+                if info["dati"].get("quote"):
+                    fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
+                    if fig_gpx: st.plotly_chart(fig_gpx, width="stretch", key=f"plot_gpx_{nome_traccia}")
+                    
+                    if st.button("🚁 Esplora questo tracciato in 3D", width="stretch", key=f"3d_arch_{nome_traccia}"):
+                        open_3d_viewer(info["dati"]["points"], info["dati"]["quote"], nome_traccia)
+
                 st.markdown("---")
                 st.markdown("#### 🌐 Condivisione Community & Foto")
                 is_shared = info["dati"].get("condivisa", False)
-                condivisa_toggle = st.toggle("Condividi questa traccia pubblicamente", value=is_shared, key=f"share_{nome_traccia}")
+                condivisa_toggle = st.toggle("Condividi traccia pubblicamente", value=is_shared, key=f"share_{nome_traccia}")
                 
                 if condivisa_toggle:
                     sd = info["dati"].get("data_svolgimento")
@@ -670,28 +790,23 @@ with tab_gpx:
                     data_sv = st.date_input("Data svolgimento:", value=def_date, key=f"date_{nome_traccia}")
                     
                     lista_strutture = list(dizionario_strutture.keys())
-                    strutture_visitate = st.multiselect("Strutture visitate in questo giro:", options=lista_strutture, default=info["dati"].get("strutture_visitate", []), key=f"strut_{nome_traccia}")
+                    strutture_visitate = st.multiselect("Strutture visitate:", options=lista_strutture, default=info["dati"].get("strutture_visitate", []), key=f"strut_{nome_traccia}")
                     
-                    desc_pubblica = st.text_area("Racconto o info utili per la Community:", value=info["dati"].get("descrizione_pubblica", ""), key=f"desc_pub_{nome_traccia}")
+                    desc_pubblica = st.text_area("Racconto o info:", value=info["dati"].get("descrizione_pubblica", ""), key=f"desc_pub_{nome_traccia}")
                     
-                    foto_caricate = st.file_uploader("Aggiungi foto alla traccia (Max 1024px automatico)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True, key=f"foto_{nome_traccia}")
+                    foto_caricate = st.file_uploader("Aggiungi foto (Max 1024px automatico)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True, key=f"foto_{nome_traccia}")
                     foto_esistenti = info["dati"].get("foto", [])
-                    if foto_esistenti:
-                        st.caption(f"📸 {len(foto_esistenti)} foto attualmente condivise.")
+                    if foto_esistenti: st.caption(f"📸 {len(foto_esistenti)} foto condivise.")
 
                     c_agg, c_del = st.columns([3, 1])
-                    if c_agg.button("💾 Aggiorna Dati di Condivisione", key=f"btn_share_{nome_traccia}", type="primary", width="stretch"):
-                        with st.spinner("Salvataggio e caricamento foto in corso (potrebbe volerci qualche istante)..."):
+                    if c_agg.button("💾 Aggiorna Condivisione", key=f"btn_share_{nome_traccia}", type="primary", width="stretch"):
+                        with st.spinner("Salvataggio in corso..."):
                             nuove_foto_urls = []
                             if foto_caricate: nuove_foto_urls = comprimi_e_salva_foto(foto_caricate)
                             tutte_le_foto = foto_esistenti + nuove_foto_urls
-                            st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = True
-                            st.session_state.tracce_gpx[nome_traccia]["dati"]["data_svolgimento"] = data_sv.strftime("%Y-%m-%d")
-                            st.session_state.tracce_gpx[nome_traccia]["dati"]["strutture_visitate"] = strutture_visitate
-                            st.session_state.tracce_gpx[nome_traccia]["dati"]["descrizione_pubblica"] = desc_pubblica
-                            st.session_state.tracce_gpx[nome_traccia]["dati"]["foto"] = tutte_le_foto
+                            st.session_state.tracce_gpx[nome_traccia]["dati"].update({"condivisa": True, "data_svolgimento": data_sv.strftime("%Y-%m-%d"), "strutture_visitate": strutture_visitate, "descrizione_pubblica": desc_pubblica, "foto": tutte_le_foto})
                             salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
-                            st.success("Condivisione e foto aggiornate con successo!")
+                            st.success("Aggiornato con successo!")
                             st.rerun()
 
                     if foto_esistenti and c_del.button("🗑️ Rimuovi Foto", key=f"btn_del_foto_{nome_traccia}", width="stretch"):
@@ -703,27 +818,23 @@ with tab_gpx:
                         st.session_state.tracce_gpx[nome_traccia]["dati"]["condivisa"] = False
                         salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
                         st.rerun()
-
-                if info["dati"].get("quote"):
-                    fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
-                    if fig_gpx: st.plotly_chart(fig_gpx, width="stretch", key=f"plot_gpx_{nome_traccia}")
                     
-                if st.button("❌ Elimina definitivamente la traccia", key=f"del_{nome_traccia}"):
+                if st.button("❌ Elimina definitivamente", key=f"del_{nome_traccia}"):
                     try:
                         supabase.table("tracce_gpx").delete().eq("utente", st.session_state.profilo_attivo).eq("nome", nome_traccia).execute()
                         del st.session_state.tracce_gpx[nome_traccia]
                         st.rerun()
-                    except Exception as e: st.error(f"Errore eliminazione: {e}")
+                    except: st.error("Errore eliminazione")
 
 with tab_community:
     st.subheader("🌐 Feed Tracce della Community")
-    st.markdown("Esplora gli itinerari, i racconti e le foto condivise pubblicamente dagli altri esploratori.")
+    st.markdown("Esplora gli itinerari condivisi pubblicamente dagli altri esploratori.")
     
     with st.spinner("Caricamento tracce condivise..."):
         tracce_feed = fetch_community_tracks()
         
         if not tracce_feed:
-            st.info("Nessuna traccia condivisa al momento. Sii il primo a condividerne una dal tuo Archivio GPX!")
+            st.info("Nessuna traccia condivisa al momento. Sii il primo!")
         else:
             for t in tracce_feed:
                 dati = t.get("dati_json", {})
@@ -737,98 +848,85 @@ with tab_community:
                     c3.metric("Dislivello -", f"D- {dati.get('d_neg', 0)} m")
                     
                     desc_pub = dati.get("descrizione_pubblica", "")
-                    if desc_pub:
-                        st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px; color:inherit;'>{desc_pub}</div>", unsafe_allow_html=True)
+                    if desc_pub: st.markdown(f"<div style='background-color:rgba(130, 130, 130, 0.1); padding:15px; border-left:4px solid #0055ff; font-style:italic; border-radius:4px; color:inherit;'>{desc_pub}</div>", unsafe_allow_html=True)
                     
                     strutture = dati.get("strutture_visitate", [])
-                    if strutture:
-                        st.markdown(f"<br>⛺ **Strutture Toccate:** " + ", ".join([f"<span style='color:#16a085; font-weight:bold;'>{s}</span>" for s in strutture]), unsafe_allow_html=True)
+                    if strutture: st.markdown(f"<br>⛺ **Strutture Toccate:** " + ", ".join([f"<span style='color:#16a085; font-weight:bold;'>{s}</span>" for s in strutture]), unsafe_allow_html=True)
                     
                     foto_urls = dati.get("foto", [])
                     if foto_urls:
-                        st.markdown("<br>📸 **Galleria Fotografica:** <span style='font-size: 12px; color: #888;'>(Clicca sulle foto per ingrandirle)</span>", unsafe_allow_html=True)
+                        st.markdown("<br>📸 **Galleria:**", unsafe_allow_html=True)
                         cols = st.columns(5)
                         for i, url in enumerate(foto_urls):
                             with cols[i % 5]: st.image(url, width="stretch")
 
                     if dati.get("quote"):
-                        fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria dell'itinerario")
-                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, width="stretch", key=f"plot_comm_{t.get('id', uuid.uuid4().hex)}")
-                    
-                    if dati.get("points"):
+                        fig_gpx_comm = disegna_profilo_altimetrico(dati["quote"], dati.get("dist", 0), "Altimetria")
+                        if fig_gpx_comm: st.plotly_chart(fig_gpx_comm, width="stretch", key=f"plot_comm_{t.get('id')}")
+                        
+                        if dati.get("points") and st.button("🚁 Esplora in 3D", width="stretch", key=f"3d_comm_{t.get('id')}"):
+                            open_3d_viewer(dati["points"], dati["quote"], t['nome'])
+                    elif dati.get("points"):
+                        # Mappa 2D fallback se mancano quote
                         lats = [p[0] for p in dati['points']]
                         lons = [p[1] for p in dati['points']]
                         fig_map = go.Figure(go.Scattermap(lat=lats, lon=lons, mode="lines", line=dict(width=4, color="#e63946")))
-                        fig_map.update_layout(
-                            map_style="open-street-map",
-                            map_center={"lat": sum(lats)/len(lats), "lon": sum(lons)/len(lons)},
-                            map_zoom=10,
-                            margin={"r":0,"t":0,"l":0,"b":0},
-                            height=300
-                        )
-                        st.plotly_chart(fig_map, width="stretch", key=f"map_comm_{t.get('id', uuid.uuid4().hex)}")
+                        fig_map.update_layout(map_style="open-street-map", map_center={"lat": sum(lats)/len(lats), "lon": sum(lons)/len(lons)}, map_zoom=10, margin={"r":0,"t":0,"l":0,"b":0}, height=300)
+                        st.plotly_chart(fig_map, width="stretch", key=f"map_comm_{t.get('id')}")
 
-                    # Sistema di Applausi (Kudos) e visualizzazione nomi
+                    # Sistema Kudos
                     st.divider()
                     kudos = dati.get("kudos", [])
                     has_kudo = st.session_state.profilo_attivo in kudos
                     c_kudo, c_names = st.columns([1, 3])
-                    
                     with c_kudo:
-                        # Cambio stile se ha già applaudito per suggerire la rimozione
                         kudo_label = f"❤️ Rimuovi Applauso" if has_kudo else f"👏 Applaudi ({len(kudos)})"
-                        if st.button(kudo_label, key=f"kudo_{t.get('id', t['nome'])}", width="stretch"):
+                        if st.button(kudo_label, key=f"kudo_{t.get('id')}", width="stretch"):
                             if has_kudo: kudos.remove(st.session_state.profilo_attivo)
                             else: kudos.append(st.session_state.profilo_attivo)
                             dati["kudos"] = kudos
                             try:
                                 supabase.table("tracce_gpx").update({"dati_json": dati}).eq("id", t["id"]).execute()
                                 st.rerun()
-                            except Exception as e: st.error("Errore nel salvataggio dell'applauso.")
-                    
+                            except: st.error("Errore salvataggio applauso.")
                     with c_names:
-                        if kudos:
-                            st.markdown(f"<div style='font-size: 13px; color: #555; margin-top: 8px;'><b>👏 Apprezzato da:</b> {', '.join(kudos)}</div>", unsafe_allow_html=True)
+                        if kudos: st.markdown(f"<div style='font-size: 13px; color: #555; margin-top: 8px;'><b>👏 Apprezzato da:</b> {', '.join(kudos)}</div>", unsafe_allow_html=True)
 
 with tab_mappa:
     with st.container(border=True):
-        st.subheader("🧭 Pianificatore e Editor Itinerario")
-        
-        c_p, c_t, c_a = st.columns(3)
+        st.subheader("🧭 Pianificatore Itinerario")
         txt_part = st.session_state.itinerario_struttura["partenza"][0] if st.session_state.itinerario_struttura["partenza"] else "Non impostata"
+        txt_tappe = " ➔ ".join([t[0] for t in st.session_state.itinerario_struttura["tappe"]]) if st.session_state.itinerario_struttura["tappe"] else "Nessuna"
         txt_arr = st.session_state.itinerario_struttura["arrivo"][0] if st.session_state.itinerario_struttura["arrivo"] else "Non impostato"
-        c_p.markdown(f"**Partenza:** `{txt_part}`")
-        c_a.markdown(f"**Arrivo:** `{txt_arr}`")
         
-        with c_t:
-            st.markdown("**Tappe Intermedie:**")
-            if not st.session_state.itinerario_struttura["tappe"]:
-                st.caption("Nessuna tappa impostata")
-            else:
+        st.markdown(f"**Partenza:** `{txt_part}` | **Tappe:** `{txt_tappe}` | **Arrivo:** `{txt_arr}`")
+        
+        # Area elimina tappe se presenti
+        if st.session_state.itinerario_struttura["tappe"]:
+            with st.expander("Modifica Tappe Intermedie"):
                 for idx_t, tappa in enumerate(st.session_state.itinerario_struttura["tappe"]):
-                    c_txt, c_del_t = st.columns([4, 1])
-                    c_txt.caption(f"🛑 {tappa[0]}")
-                    if c_del_t.button("X", key=f"del_tappa_{idx_t}", help="Rimuovi tappa"):
+                    cx, c_del = st.columns([4, 1])
+                    cx.caption(f"🛑 {tappa[0]}")
+                    if c_del.button("❌", key=f"del_t_{idx_t}"):
                         st.session_state.itinerario_struttura["tappe"].pop(idx_t)
                         st.rerun()
         
         punti_it = [p for p in [st.session_state.itinerario_struttura["partenza"]] + st.session_state.itinerario_struttura["tappe"] + [st.session_state.itinerario_struttura["arrivo"]] if p]
         
-        st.markdown("<br>", unsafe_allow_html=True)
         c_calc, c_reset = st.columns([2, 1])
         with c_calc:
             if st.button("🔄 Calcola e Adatta Tracciato", type="primary", width="stretch"):
                 if len(punti_it) >= 2 and grafo_motore:
-                    with st.spinner("Calcolo rotta sulla rete sentieristica..."):
+                    with st.spinner("Calcolo rotta sentieristica in corso..."):
                         if rotta := calcola_percorso_locale(grafo_motore, albero_motore, nodi_motore, [(p[1], p[2]) for p in punti_it]):
                             st.session_state.itinerario_attivo = rotta
                             dist = round(rotta['distance'] / 1000, 2)
                             dtm_file = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else "DTM_vda" if os.path.exists("DTM_vda") else None
                             q_arr, d_pos, d_neg = calcola_profilo_dtm(rotta['geometry']['coordinates'], dtm_file) if dtm_file else ([], 0, 0)
                             st.session_state.itinerario_metadati = {"dist": dist, "d_pos": d_pos, "d_neg": d_neg, "tempo": stima_tempo_cai(dist, d_pos), "quote": q_arr}
-                        else: st.error("❌ Rete interrotta o punti troppo distanti.")
+                        else: st.error("❌ Rete interrotta.")
                 elif not grafo_motore: st.error("Rete escursionistica mancante.")
-                else: st.warning("Inserisci almeno Partenza e Arrivo.")
+                else: st.warning("Inserisci Partenza e Arrivo.")
         with c_reset:
             if st.button("🗑️ Svuota Tutto", width="stretch"):
                 st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
@@ -840,23 +938,27 @@ with tab_mappa:
             if meta.get('quote'):
                 if fig := disegna_profilo_altimetrico(meta['quote'], meta['dist'], "Profilo Altimetrico Calcolato (DTM)"): st.plotly_chart(fig, width="stretch", key="plot_calc")
             
-            c_dl_gpx, c_save_gpx = st.columns(2)
+            c_dl_gpx, c_3d, c_save = st.columns(3)
             with c_dl_gpx:
                 st.download_button("📥 Scarica .GPX", data=genera_gpx(st.session_state.itinerario_attivo['geometry']['coordinates']), file_name="itinerario.gpx", mime="application/gpx+xml", width="stretch")
-            
-            with c_save_gpx:
-                with st.popover("💾 Salva in Archivio Cloud"):
-                    nuovo_nome_it = st.text_input("Nome Itinerario:", value="Nuovo Itinerario Pianificato")
+            with c_3d:
+                if meta.get('quote') and st.button("🚁 Esplora in 3D", width="stretch", key="btn_3d_pianificatore"):
+                    pts = [(p[1], p[0]) for p in st.session_state.itinerario_attivo['geometry']['coordinates']]
+                    open_3d_viewer(pts, meta['quote'], "Itinerario Calcolato su Rete")
+            with c_save:
+                with st.popover("💾 Salva in Archivio"):
+                    nuovo_nome_it = st.text_input("Nome Itinerario:", value="Nuovo Itinerario")
                     if st.button("Conferma Salvataggio", type="primary", width="stretch"):
                         dati_da_salvare = {
                             "points": [(p[1], p[0]) for p in st.session_state.itinerario_attivo['geometry']['coordinates']],
                             "quote": meta.get('quote', []), "dist": meta['dist'], "d_pos": meta['d_pos'], "d_neg": meta['d_neg'],
                             "stato": "Pianificata", "condivisa": False, "foto": []
                         }
-                        if salva_traccia_gpx(st.session_state.profilo_attivo, nuovo_nome_it, "Traccia creata tramite Pianificatore", True, dati_da_salvare):
+                        if salva_traccia_gpx(st.session_state.profilo_attivo, nuovo_nome_it, "Traccia calcolata da Pianificatore", True, dati_da_salvare):
                             st.session_state.tracce_gpx = carica_tracce_gpx_cloud(st.session_state.profilo_attivo)
-                            st.success("Salvato con successo in Archivio!")
+                            st.success("Salvato nel tuo Archivio Cloud!")
 
+    # Costruzione Mappa Folium
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
     folium.TileLayer('OpenStreetMap', name='Topografica (OSM)', overlay=False).add_to(m)
@@ -952,8 +1054,32 @@ with tab_mappa:
     map_data = st_folium(m, width="100%", height=550, key="mappa_vda", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
 
     st.markdown("---")
-    st.toggle("🕸️ Mostra Rete Sentieristica sulla Mappa", key="mostra_sentieri_toggle")
-    st.caption("💡 **Suggerimento:** Attiva la rete sentieristica solo quando vuoi esplorarla visivamente. Tenerla disattivata renderà la mappa fluida e i tuoi clic saranno istantanei!")
+    st.markdown("#### 🗺️ Opzioni Mappa & Esplorazione 3D")
+    
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        st.toggle("🕸️ Mostra Rete Sentieristica sulla Mappa", key="mostra_sentieri_toggle")
+        st.caption("💡 Disabilitala per rendere la mappa fluida e velocissima.")
+        
+    with col_opt2:
+        tracce_3d = {}
+        if st.session_state.get("itinerario_attivo") and st.session_state.get("itinerario_metadati", {}).get("quote"):
+            tracce_3d["📍 Itinerario Calcolato"] = (st.session_state.itinerario_attivo['geometry']['coordinates'], st.session_state.itinerario_metadati['quote'])
+        
+        if "tracce_gpx" in st.session_state:
+            for nome, info in st.session_state.tracce_gpx.items():
+                if info.get("visibile", True) and info["dati"].get("quote"):
+                    tracce_3d[f"🗺️ {nome}"] = (info["dati"]["points"], info["dati"]["quote"])
+                    
+        if tracce_3d:
+            scelta_3d = st.selectbox("Apri rapidamente una traccia in 3D:", list(tracce_3d.keys()), label_visibility="collapsed")
+            if st.button("🚁 Avvia Esploratore 3D", width="stretch", type="primary"):
+                pts, qts = tracce_3d[scelta_3d]
+                # Le coordinate del GeoJSON (Itinerario Calcolato) sono (lon, lat), il 3D vuole (lat, lon)
+                pts_format = [(p[1], p[0]) for p in pts] if scelta_3d.startswith("📍") else pts
+                open_3d_viewer(pts_format, qts, scelta_3d)
+        else:
+            st.info("💡 Calcola un itinerario o carica un GPX per attivare il 3D.")
 
     n_cliccato, clk_t, clk_m = None, map_data.get("last_object_clicked_tooltip"), map_data.get("last_clicked")
     
