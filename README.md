@@ -1,72 +1,66 @@
-# Esplorazione e Pianificazione VdA 🏔️
+\# Esplorazione e Pianificazione VdA 🏔️
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bivacchi-rifugi-vda.streamlit.app/)
 
-Una WebGIS App avanzata per l'esplorazione, la pianificazione degli itinerari e la gestione delle visite ai Rifugi e Bivacchi della Valle d'Aosta. 
 
-Progettata per gli amanti del trekking, l'applicazione unisce cartografia interattiva, calcolo topologico dei percorsi offline, analisi altimetrica ad alta precisione e un hub social per la condivisione delle esperienze.
+\*\*App Rifugi, Bivacchi e Vette della Valle d'Aosta\*\*  
 
----
+\*Versione 9.5\* | Autore: Fabrizio Nori
 
-## 🌟 Novità della Versione 7.1
-* **Hub Community Potenziato:** Nuovo sistema di **Kudos (Applausi)** per apprezzare le tracce pubbliche degli altri esploratori.
-* **Performance Mappa Fulminee:** Aggiunto un toggle rapido per nascondere/mostrare la rete sentieristica, garantendo un'interazione istantanea senza cali di frame-rate.
-* **Rete Sentieristica Estesa:** Nuovo layer vettoriale ottimizzato topologicamente estrapolato direttamente da OpenStreetMap (tramite Overpass API).
-* **Gestione Account Avanzata:** Nuovo menu dedicato per il cambio password (tramite PIN di sicurezza) e l'eliminazione definitiva del profilo e dei dati associati.
-* **Changelog Integrato:** Menu dedicato all'interno dell'app per restare sempre aggiornati sulle ultime novità introdotte.
 
----
 
-## 🚀 Funzionalità Principali
+Un'applicazione GIS web interattiva, sviluppata in Python con Streamlit, per esplorare la rete sentieristica della Valle d'Aosta, pianificare itinerari, collezionare vette e gestire le proprie tracce GPX in un ambiente 3D. 
 
-* **Mappa Interattiva & Mobile-Friendly:** Visualizzazione dinamica di rifugi, bivacchi e sentieri (Folium e OSM) con legenda a scomparsa ottimizzata per smartphone.
-* **Dashboard KPI & Profili Cloud:** Sistema di autenticazione e salvataggio in cloud (Supabase) per tracciare lo stato delle visite (Visitato, Pianificato, Non visitato).
-* **Motore di Routing (A*):** Calcolo istantaneo degli itinerari basato sui nodi della rete OSM. L'algoritmo ripara automaticamente le micro-interruzioni di rete grazie al `cKDTree` (tolleranza 30m).
-* **Radar Esplorazione & Smart Links:** Individuazione rapida delle 3 strutture più vicine e deep-link georeferenziati per Komoot, Wikiloc e Gulliver.
-* **Archivio GPX Cloud & Galleria Fotografica:** Caricamento, modifica e condivisione pubblica di percorsi GPX personali. Include la compressione automatica delle foto (tramite Pillow) per ottimizzare lo storage su Supabase.
-* **Analisi Altimetrica & Meteo Live:** Estrazione precisa delle quote da DTM locale (raster .tif), calcolo tempi stimati (Formula CAI) e previsioni meteo a 3 giorni (Open-Meteo).
 
----
 
-## 🛠️ Requisiti di Sistema e Installazione Locale
+L'app si appoggia a un database in cloud (Supabase) per il salvataggio dei progressi personali e include un hub di condivisione per la Community.
 
-Per far girare l'applicazione in locale, assicurati di avere Python installato e procedi con i seguenti passaggi.
 
-### 1. Clona il repository
-```bash
-git clone https://github.com/FNX996/Bivacchi-Rifugi-Valle-d-Aosta.git
-cd Bivacchi-Rifugi-Valle-d-Aosta
-```
 
-### 2. Installa le librerie
-Installa le dipendenze elencate nel file `requirements.txt`:
-```bash
-pip install -r requirements.txt
-```
-*Le librerie principali includono: `streamlit`, `geopandas`, `folium`, `networkx`, `scipy`, `rasterio`, `gpxpy`, `plotly`, `supabase`, `Pillow`.*
+\## 🌟 Funzionalità Principali
 
-### 3. File Dati (Non inclusi nel repository per limiti di dimensione)
-Assicurati che i seguenti file siano presenti nella root folder dell'app:
-* `bivacchi_vda.geojson`
-* `rifugi_vda.geojson`
-* `sentieri_vda_ottimizzati.geojson`
-* `DTM_vda.tif` (Modello altimetrico raster)
 
-### 4. Configurazione Database (Supabase)
-Crea una cartella nascosta `.streamlit` nella root del progetto, crea un file `secrets.toml` all'interno e inserisci le tue credenziali Supabase:
-```toml
-[supabase]
-url = "IL_TUO_URL_SUPABASE"
-key = "LA_TUA_CHIAVE_ANON_PUBLIC"
-```
 
-### 5. Avvio dell'App
-Avvia il server locale di Streamlit:
-```bash
-streamlit run app.py
-```
+\*   🗺️ \*\*Mappa Interattiva \& Radar:\*\* Esplora la mappa topografica con i layer di Bivacchi, Rifugi e Vette (Cime > 3000m e > 4000m). Clicca su un punto per attivare il radar distanze, consultare il meteo e collegarti ai principali portali (Gulliver, Wikiloc, Komoot).
 
----
+\*   🧭 \*\*Pianificatore di Itinerari (Motore A\*):\*\* Inserisci Partenza, Tappe e Arrivo direttamente dalla mappa. Il motore topologico calcolerà il percorso esatto agganciandosi alla rete sentieristica ufficiale, restituendo distanza, dislivello reale (tramite DTM) e tempi stimati CAI.
 
-👨‍💻 **Sviluppato da:**
-Fabrizio Nori (Bizzietto / @FNX996) - Analisi Dati, Integrazione GIS e Sviluppo App.
+\*   🚁 \*\*Esploratore 3D Interattivo:\*\* Visualizza qualsiasi traccia GPX o itinerario calcolato in un ambiente 3D. Muovi il cursore per scorrere la traccia, vedere la pendenza istantanea e ammirare il percorso renderizzato direttamente sul modello digitale del terreno (DTM) della montagna.
+
+\*   📊 \*\*Database \& Registri Cloud:\*\* Tieni traccia delle tue conquiste. Spunta le strutture e le vette come \*Visitate\*, \*Pianificate\* o \*Non Visitate\*. I dati vengono salvati in modo sicuro e persistente sul tuo profilo cloud personale.
+
+\*   📂 \*\*Archivio GPX \& Editor:\*\* Carica i tuoi file GPX grezzi. L'app li comprime (a tua scelta), ne genera il profilo altimetrico e ti permette di modificarli rimandandoli al Pianificatore per agganciarli ai sentieri ufficiali.
+
+\*   🌐 \*\*Feed della Community:\*\* Condividi pubblicamente le tue tracce migliori con data, strutture visitate, racconti e fotografie. Lascia un applauso (Kudos) agli itinerari degli altri esploratori.
+
+\*   👑 \*\*Pannello Admin:\*\* Sistema integrato per la segnalazione di bug o suggerimenti direttamente dall'app, gestibile tramite un pannello di controllo esclusivo per l'amministratore.
+
+
+
+\## 🛠️ Stack Tecnologico
+
+
+
+\*   \*\*Frontend / Framework:\*\* Python, Streamlit
+
+\*   \*\*Motore GIS / Dati Spaziali:\*\* Geopandas, Folium, Rasterio, Shapely
+
+\*   \*\*Routing \& Pathfinding:\*\* NetworkX, SciPy (cKDTree per saldatura topologica locale)
+
+\*   \*\*Visualizzazione Dati \& 3D:\*\* Plotly Graph Objects, Branca
+
+\*   \*\*Backend \& Cloud Storage:\*\* Supabase (Database PostgreSQL e Storage Immagini)
+
+\*   \*\*Elaborazione GPX:\*\* Gpxpy
+
+
+
+\## 🚀 Utilizzo
+
+
+
+1\. Registrati o accedi con il tuo profilo dal menu laterale. Se è il primo accesso, dovrai impostare anche un PIN segreto per il recupero password.
+
+2\. Utilizza i filtri ("Mostra Rete Sentieristica" o "Mostra Vette > 3000m") sotto la mappa principale per attivare o disattivare i livelli in base alle tue esigenze (disattivare i sentieri rende la mappa più fluida).
+
+3\. Salva i tuoi percorsi e goditi le tue esplorazioni!
+
