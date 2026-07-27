@@ -36,7 +36,15 @@ st.markdown("""
         .stTabs [data-baseweb="tab-list"] { gap: 24px; }
         .stTabs [data-baseweb="tab"] { height: 50px; font-weight: bold; font-size: 16px; }
         
-        /* OVERLAY DI CARICAMENTO GLOBALE: Blocca interazioni e mostra feedback visivo */
+        /* OVERLAY DI CARICAMENTO GLOBALE: Blocca interazioni e mostra feedback visivo (Aggiornato) */
+        [data-test-script-state="running"] [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"]) { 
+            pointer-events: none !important; 
+            opacity: 0.6 !important; 
+            filter: grayscale(20%);
+            transition: opacity 0.2s ease-in-out; 
+        }
+        
         [data-stale="true"] { 
             pointer-events: none !important; 
             opacity: 0.6 !important; 
@@ -44,8 +52,9 @@ st.markdown("""
             transition: opacity 0.2s ease-in-out; 
         }
         
-        /* POPUP "ELABORAZIONE IN CORSO" animato */
-        .stApp[data-test-script-state="running"]::after {
+        /* POPUP "ELABORAZIONE IN CORSO" animato (Aggiornato) */
+        [data-test-script-state="running"]::after,
+        [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"])::after {
             content: "🔄 Elaborazione in corso...";
             position: fixed;
             top: 20px;
@@ -61,6 +70,12 @@ st.markdown("""
             animation: pulse 1s infinite alternate;
             pointer-events: none;
         }
+        
+        /* Nasconde il runner di default di Streamlit mantenendolo nel DOM */
+        [data-testid="stStatusWidget"] {
+            visibility: hidden;
+        }
+
         @keyframes pulse { 0% { opacity: 0.8; transform: scale(0.98); } 100% { opacity: 1; transform: scale(1.02); } }
     </style>
 """, unsafe_allow_html=True)
@@ -1011,6 +1026,10 @@ with tab_mappa:
         dettagli = f"<p style='margin: 4px 0;'><b>Accesso:</b> {get_val(row, 'accesso')}</p>" if tipo == "struttura" else ""
         desc = get_val(row, "desc_it", "") if tipo == "struttura" else "Vetta d'alta quota (>3000m)"
         
+        # Ripristinato pulsante Sito Web
+        link = get_val(row, "link1_href", "N/D")
+        link_html = f'<a href="{link}" target="_blank" style="text-decoration: none; color: white; background-color: #0066cc; padding: 6px 12px; border-radius: 4px; margin-right: 5px; font-weight: bold;">🔗 Sito Web</a>' if link != "N/D" and link != "#" else ""
+        
         return f"""
         <div style='font-family: sans-serif; font-size: 14px; min-width: 250px;'>
             <h3 style='margin: 0 0 8px 0;'>{n}</h3>
@@ -1018,6 +1037,7 @@ with tab_mappa:
             {dettagli}
             <p style='margin: 4px 0;'><b>Stato:</b> <span style='color:{col_st(s)};font-weight:bold;'>{s.upper()}</span></p>
             <div style='margin: 12px 0;'>
+                {link_html}
                 <a href="{meteo_url}" target="_blank" style="text-decoration: none; color: white; background-color: #ff6600; padding: 6px 12px; border-radius: 4px; font-weight: bold;">☀️ Meteo</a>
             </div>
             <hr>
