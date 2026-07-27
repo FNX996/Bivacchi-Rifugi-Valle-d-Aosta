@@ -21,6 +21,7 @@ from PIL import Image
 import io
 import uuid
 import warnings
+import pandas as pd
 
 # Ignoriamo i warning innocui di Geopandas/Pyogrio
 warnings.filterwarnings("ignore", message=".*Several features with id.*")
@@ -107,7 +108,6 @@ def calcola_profilo_dtm(traccia_coordinate, dtm_path):
     except: return [], 0, 0
 
 def genera_superficie_3d(lats, lons, dtm_path, padding=0.015, max_resolution=60):
-    """Estrae e ricampiona un bounding box del DTM per generare una superficie 3D leggera"""
     try:
         min_lat, max_lat = min(lats) - padding, max(lats) + padding
         min_lon, max_lon = min(lons) - padding, max(lons) + padding
@@ -124,12 +124,10 @@ def genera_superficie_3d(lats, lons, dtm_path, padding=0.015, max_resolution=60)
             window = rasterio.windows.Window(px_min, py_min, px_max - px_min, py_max - py_min)
             data = src.read(1, window=window)
             
-            # Gestione nodata e valori anomali
             if src.nodata is not None:
                 data = np.where(data == src.nodata, np.nan, data)
             data = np.where(data < 0, 0, data)
             
-            # Downsampling aggressivo per evitare il crash del browser nel render 3D
             step_y = max(1, data.shape[0] // max_resolution)
             step_x = max(1, data.shape[1] // max_resolution)
             
@@ -178,7 +176,6 @@ def open_3d_viewer(points, quote, nome):
     
     fig = go.Figure()
     
-    # Mappa del Terreno 3D (Se il DTM è disponibile)
     dtm_path = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else "DTM_vda" if os.path.exists("DTM_vda") else None
     if dtm_path:
         with st.spinner("Generazione del modello del terreno in corso..."):
@@ -195,7 +192,6 @@ def open_3d_viewer(points, quote, nome):
                     lighting=dict(ambient=0.6, diffuse=0.8, roughness=0.5, specular=0.1)
                 ))
     
-    # Traccia 3D colorata per pendenza
     fig.add_trace(go.Scatter3d(
         x=lons, y=lats, z=quote,
         mode='lines',
@@ -210,7 +206,6 @@ def open_3d_viewer(points, quote, nome):
         name="Tracciato"
     ))
     
-    # Indicatore di Posizione sferico
     fig.add_trace(go.Scatter3d(
         x=[lons[idx]], y=[lats[idx]], z=[quote[idx]],
         mode='markers',
@@ -351,7 +346,10 @@ def fetch_community_tracks():
 def autosave_quick_edit():
     nuovo_stato = st.session_state.quick_edit_selectbox
     struttura, profilo = st.session_state.struttura_attiva, st.session_state.profilo_attivo
-    for df_name in ["bivacchi", "rifugi"]:
+    dfs = ["bivacchi", "rifugi"]
+    if "cime" in st.session_state: dfs.append("cime")
+    
+    for df_name in dfs:
         df = st.session_state[df_name]
         idx = df[df["name_it"] == struttura].index
         if not idx.empty:
@@ -556,24 +554,22 @@ st.sidebar.markdown("""
 <div style="background-color: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
     <h5 style="margin-top: 0; color: #f8fafc; font-size: 15px; font-weight: 600;">💡 Guida Rapida</h5>
     <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #cbd5e1;">
-        <li><b>Mappa:</b> Clicca sulle strutture per info, sito web, meteo ed edita lo stato. Radar esplorazione attivo!</li>
+        <li><b>Mappa:</b> Clicca sulle strutture o vette per info e meteo. Radar esplorazione attivo!</li>
         <li><b>Itinerari:</b> Assegna punti sulla mappa per calcolare percorsi e DTM.</li>
         <li><b>GPX & Community:</b> Archivio tracce, esploratore 3D interattivo e condivisione con foto.</li>
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 8.5<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.2<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 8.5**
-    * 🌍 **Modello Terreno 3D:** L'esploratore 3D ora carica la reale orografia della montagna sotto il tuo tracciato!
-    * 🚀 **Scorciatoia 3D dalla Mappa:** Aggiunto un pannello speciale sotto la Mappa per lanciare subito il 3D su qualsiasi traccia caricata.
-    * 🚁 **Esploratore 3D V8:** Scopri altitudine e pendenza muovendo il cursore in un ambiente completamente interattivo.
-    * ✏️ **Editor Tracce Libero:** "Modifica su Mappa" ti permette di fondere una vecchia traccia alla rete ufficiale.
-    * 💾 **Salvataggio Istantaneo:** Salva gli itinerari calcolati direttamente nel Cloud.
+    **Versione 9.2**
+    * 🏔️ **Vette in 3D & Radar:** Le Cime ora sono integrate nel motore dell'app: funzionano col radar esplorativo e possono essere tappe del tuo itinerario!
+    * 🛆 **Nuovi Marker Dinamici:** Introdotto un design specifico a triangolo per le vette. Il colore del bordo cambia in base allo stato di visita per una leggibilità immediata!
+    * ⚙️ **Filtri Migliorati:** L'interruttore delle Vette è stato spostato sotto la mappa per un accesso più rapido durante l'esplorazione.
     """)
 
 if "dati_caricati" not in st.session_state:
@@ -588,6 +584,18 @@ if "dati_caricati" not in st.session_state:
         
         st.session_state.bivacchi, st.session_state.rifugi = gdf_b, gdf_r
         st.session_state.sentieri = gpd.read_file("sentieri_vda_ottimizzati.geojson") if os.path.exists("sentieri_vda_ottimizzati.geojson") else None
+        
+        # Aggiunta Layer Cime
+        if os.path.exists("cime_vda.geojson"):
+            gdf_c = gpd.read_file("cime_vda.geojson")
+            gdf_c.columns = gdf_c.columns.str.lower()
+            if 'name' in gdf_c.columns and 'name_it' not in gdf_c.columns:
+                gdf_c['name_it'] = gdf_c['name']
+            
+            gdf_c = gdf_c[gdf_c['name_it'].notna()]
+            gdf_c["stato_visita"] = [stati_cloud.get(r.get("name_it"), "Non visitato") for _, r in gdf_c.iterrows()]
+            st.session_state.cime = gdf_c
+            
         st.session_state.dati_caricati = True
     else:
         st.error("File GeoJSON non trovati!")
@@ -598,13 +606,21 @@ if st.session_state.sentieri is not None:
     with st.spinner("Inizializzazione Motore A*..."):
         grafo_motore, nodi_motore, albero_motore = prepara_motore_routing(st.session_state.sentieri)
 
+dfs_da_unire = [st.session_state.bivacchi, st.session_state.rifugi]
+if "cime" in st.session_state:
+    dfs_da_unire.append(st.session_state.cime)
+
 dizionario_strutture = {
     row.get("name_it"): (row.geometry.y, row.geometry.x, float(row.get("ele", 0))) 
-    for df in [st.session_state.bivacchi, st.session_state.rifugi] for _, row in df.iterrows() if row.get("name_it")
+    for df in dfs_da_unire for _, row in df.iterrows() if row.get("name_it")
 }
 
 mappa_bivacchi = st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'].isin(stati_selezionati)]
 mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].isin(stati_selezionati)]
+if "cime" in st.session_state:
+    mappa_cime = st.session_state.cime[st.session_state.cime['stato_visita'].isin(stati_selezionati)]
+else:
+    mappa_cime = pd.DataFrame()
 
 # Controllo Admin per pannello nascosto
 is_admin = st.session_state.get("profilo_attivo", "").strip().lower() in ["fabrizio", "fabrizio nori", "nori fabrizio", "bizzietto"]
@@ -959,6 +975,8 @@ with tab_mappa:
                             st.success("Salvato nel tuo Archivio Cloud!")
 
     # Costruzione Mappa Folium
+    mostra_cime = st.session_state.get("mostra_cime_toggle", True)
+    
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
     folium.TileLayer('OpenStreetMap', name='Topografica (OSM)', overlay=False).add_to(m)
@@ -966,24 +984,25 @@ with tab_mappa:
 
     def col_st(s): return "#28a745" if s == "Visitato" else "#ffc107" if s == "Pianificato" else "#dc3545"
 
-    def crea_popup_veloce(row):
-        n, q, a, s = get_val(row, "name_it"), get_val(row, "ele"), get_val(row, "accesso"), get_val(row, "stato_visita", "Non visitato")
-        link = get_val(row, "link1_href", "#")
-        desc = get_val(row, "desc_it", "")
+    def crea_popup_veloce(row, tipo="struttura"):
+        n, q, s = get_val(row, "name_it"), get_val(row, "ele"), get_val(row, "stato_visita", "Non visitato")
         lat, lon = row.geometry.y, row.geometry.x
         meteo_url = f"https://www.meteoblue.com/it/tempo/settimana/{round(lat, 4)}N{round(lon, 4)}E"
         
+        dettagli = f"<p style='margin: 4px 0;'><b>Accesso:</b> {get_val(row, 'accesso')}</p>" if tipo == "struttura" else ""
+        desc = get_val(row, "desc_it", "") if tipo == "struttura" else "Vetta d'alta quota (>3000m)"
+        
         return f"""
-        <div style='font-family: sans-serif; font-size: 14px; min-width: 280px; color: #333;'>
-            <h3 style='margin: 0 0 8px 0; color: #111;'>{n}</h3>
-            <p style='margin: 4px 0;'><b>Quota:</b> {q} m | <b>Accesso:</b> {a}</p>
+        <div style='font-family: sans-serif; font-size: 14px; min-width: 250px;'>
+            <h3 style='margin: 0 0 8px 0;'>{n}</h3>
+            <p style='margin: 4px 0;'><b>Quota:</b> {q} m</p>
+            {dettagli}
             <p style='margin: 4px 0;'><b>Stato:</b> <span style='color:{col_st(s)};font-weight:bold;'>{s.upper()}</span></p>
             <div style='margin: 12px 0;'>
-                <a href="{link}" target="_blank" style="text-decoration: none; color: white; background-color: #0066cc; padding: 6px 12px; border-radius: 4px; font-size: 12px; margin-right: 5px; font-weight: bold; display: inline-block;">🔗 Sito Web</a>
-                <a href="{meteo_url}" target="_blank" style="text-decoration: none; color: white; background-color: #ff6600; padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: bold; display: inline-block;">☀️ Meteo</a>
+                <a href="{meteo_url}" target="_blank" style="text-decoration: none; color: white; background-color: #ff6600; padding: 6px 12px; border-radius: 4px; font-weight: bold;">☀️ Meteo</a>
             </div>
-            <hr style='border: 0; border-bottom: 1px solid #ccc; margin: 10px 0;'>
-            <p style='margin: 0; font-size: 12px; line-height: 1.4; color: #444;'>{desc}</p>
+            <hr>
+            <p style='font-size: 12px;'>{desc}</p>
         </div>
         """
 
@@ -1015,6 +1034,27 @@ with tab_mappa:
 
     for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
+    
+    if mostra_cime and not mappa_cime.empty:
+        for _, r in mappa_cime.iterrows():
+            ele_cima = float(get_val(r, "ele", 0))
+            colore_cima = "black" if ele_cima >= 4000 else "#0055ff"
+            stato_col = col_st(get_val(r, 'stato_visita'))
+            
+            icon_html = f"""
+            <div style='width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;'>
+                <svg width="32" height="32" viewBox="0 0 32 32" style="filter: drop-shadow(2px 2px 3px rgba(0,0,0,0.5));">
+                    <polygon points="16,4 28,26 4,26" fill="{colore_cima}" stroke="{stato_col}" stroke-width="4" stroke-linejoin="round"/>
+                </svg>
+            </div>
+            """
+            
+            folium.Marker(
+                [r.geometry.y, r.geometry.x], 
+                popup=folium.Popup(crea_popup_veloce(r, "cima")), 
+                tooltip=get_val(r, "name_it"), 
+                icon=folium.DivIcon(html=icon_html, icon_size=(32, 32), icon_anchor=(16, 16))
+            ).add_to(m)
 
     legend_template = """
     {% macro html(this, kwargs) %}
@@ -1022,7 +1062,7 @@ with tab_mappa:
         <button onclick="var el=document.getElementById('legenda-mappa-vda'); el.style.display=(el.style.display==='none')?'block':'none';" style="background-color: white; border: 2px solid #ccc; padding: 8px 15px; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-weight: bold; font-family: sans-serif; font-size: 14px; color: #333; display: flex; align-items: center; justify-content: center;">
             🗺️ Legenda
         </button>
-        <div id="legenda-mappa-vda" style="display: none; margin-top: 10px; width: 220px; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; color: #333;">
+        <div id="legenda-mappa-vda" style="display: none; margin-top: 10px; width: 240px; background-color: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif; font-size: 12px; border: 1px solid #ccc; color: #333;">
             <b style="font-size: 14px; display: block; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; color: #000;">Dettagli</b>
             <div style="margin-bottom: 8px;">
                 <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Tracciati</span>
@@ -1031,9 +1071,11 @@ with tab_mappa:
                 <div style="display: flex; align-items: center; margin-top: 4px;"><span style="border-top: 3px dashed #2ca02c; width: 20px; display: inline-block; margin-right: 8px;"></span><span style="color: #333;">Pedonale</span></div>
             </div>
             <div style="margin-bottom: 8px;">
-                <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Strutture</span>
+                <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Strutture & Vette</span>
                 <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">⛺</div><span style="color: #333;">Bivacco</span></div>
                 <div style="display: flex; align-items: center; margin-top: 4px;"><div style="background-color: #999; width: 16px; height: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; margin-right: 8px; font-size: 10px; color: white;">🏠</div><span style="color: #333;">Rifugio</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><svg width="18" height="18" style="margin-right: 8px;"><polygon points="9,2 16,15 2,15" fill="#0055ff" stroke="#666" stroke-width="2" stroke-linejoin="round"/></svg><span style="color: #333;">Vetta 3000-3999m</span></div>
+                <div style="display: flex; align-items: center; margin-top: 4px;"><svg width="18" height="18" style="margin-right: 8px;"><polygon points="9,2 16,15 2,15" fill="black" stroke="#666" stroke-width="2" stroke-linejoin="round"/></svg><span style="color: #333;">Vetta >4000m</span></div>
             </div>
             <div>
                 <span style="font-weight: bold; display: block; font-size: 10px; color: #666; text-transform: uppercase;">Stato Visita</span>
@@ -1059,7 +1101,8 @@ with tab_mappa:
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
         st.toggle("🕸️ Mostra Rete Sentieristica sulla Mappa", key="mostra_sentieri_toggle")
-        st.caption("💡 Disabilitala per rendere la mappa fluida e velocissima.")
+        st.toggle("🏔️ Mostra Vette > 3000m", value=True, key="mostra_cime_toggle")
+        st.caption("💡 Disabilita i layer per rendere la mappa più fluida e velocissima.")
         
     with col_opt2:
         tracce_3d = {}
@@ -1075,7 +1118,6 @@ with tab_mappa:
             scelta_3d = st.selectbox("Apri rapidamente una traccia in 3D:", list(tracce_3d.keys()), label_visibility="collapsed")
             if st.button("🚁 Avvia Esploratore 3D", width="stretch", type="primary"):
                 pts, qts = tracce_3d[scelta_3d]
-                # Le coordinate del GeoJSON (Itinerario Calcolato) sono (lon, lat), il 3D vuole (lat, lon)
                 pts_format = [(p[1], p[0]) for p in pts] if scelta_3d.startswith("📍") else pts
                 open_3d_viewer(pts_format, qts, scelta_3d)
         else:
@@ -1106,7 +1148,7 @@ with tab_mappa:
 
             if clk_t:
                 st.session_state.struttura_attiva = clk_t
-                st_corr = next((r["stato_visita"] for df in [st.session_state.bivacchi, st.session_state.rifugi] for _, r in df.iterrows() if r["name_it"] == clk_t), "Non visitato")
+                st_corr = next((r["stato_visita"] for df in dfs_da_unire for _, r in df.iterrows() if r["name_it"] == clk_t), "Non visitato")
                 st.selectbox("Modifica stato cloud:", options=stati_disponibili, index=stati_disponibili.index(st_corr), key="quick_edit_selectbox", on_change=autosave_quick_edit)
 
             st.markdown("#### 🎯 Radar Esplorazione")
@@ -1146,40 +1188,39 @@ with tab_registri:
     
     tot_biv = len(st.session_state.bivacchi)
     vis_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Visitato'])
-    plan_biv = len(st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'] == 'Pianificato'])
     
     tot_rif = len(st.session_state.rifugi)
     vis_rif = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Visitato'])
-    plan_rif = len(st.session_state.rifugi[st.session_state.rifugi['stato_visita'] == 'Pianificato'])
     
+    tot_cime = len(st.session_state.cime) if "cime" in st.session_state else 0
+    vis_cime = len(st.session_state.cime[st.session_state.cime['stato_visita'] == 'Visitato']) if "cime" in st.session_state else 0
+
     st.markdown(f"""
-    <div style="display: flex; gap: 20px; margin-bottom: 20px;">
-        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top: 0; text-align: center;">⛺ Riepilogo Bivacchi</h4>
-            <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_biv}</b><br><span style="font-size: 13px;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_biv}</b><br><span style="font-size: 13px;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_biv}</b><br><span style="font-size: 13px;">Pianificati</span></div>
-            </div>
+    <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d;">
+            <h4 style="margin-top: 0; text-align: center;">⛺ Bivacchi</h4>
+            <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_biv}</b> / {tot_biv} Visitati</div>
         </div>
-        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top: 0; text-align: center;">🏠 Riepilogo Rifugi</h4>
-            <div style="display: flex; justify-content: space-around; margin-top: 10px;">
-                <div style="text-align: center;"><b style="color: #007bff; font-size: 20px;">{tot_rif}</b><br><span style="font-size: 13px;">Totali</span></div>
-                <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_rif}</b><br><span style="font-size: 13px;">Visitati</span></div>
-                <div style="text-align: center;"><b style="color: #ffc107; font-size: 20px;">{plan_rif}</b><br><span style="font-size: 13px;">Pianificati</span></div>
-            </div>
+        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #6c757d;">
+            <h4 style="margin-top: 0; text-align: center;">🏠 Rifugi</h4>
+            <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_rif}</b> / {tot_rif} Visitati</div>
+        </div>
+        <div style="flex: 1; background-color: rgba(130,130,130,0.1); padding: 15px; border-radius: 8px; border-top: 4px solid #0055ff;">
+            <h4 style="margin-top: 0; text-align: center;">⛰️ Vette > 3000m</h4>
+            <div style="text-align: center;"><b style="color: #28a745; font-size: 20px;">{vis_cime}</b> / {tot_cime} Conquistate</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    colonne_desiderate = ["name_it", "ele", "accesso", "stato_visita"]
-    cb, cr = [c for c in colonne_desiderate if c in st.session_state.bivacchi.columns], [c for c in colonne_desiderate if c in st.session_state.rifugi.columns]
-
-    col1, col2 = st.columns(2)
-    with col1:
+    col_b, col_r, col_c = st.columns(3)
+    with col_b:
         st.markdown("### ⛺ Bivacchi")
-        st.data_editor(st.session_state.bivacchi[cb], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, width="stretch", hide_index=True, key="editor_b", on_change=lambda: sync_tables_cloud("bivacchi", "editor_b"))
-    with col2:
+        st.data_editor(st.session_state.bivacchi[["name_it", "ele", "stato_visita"]], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili)}, width="stretch", hide_index=True, key="editor_b", on_change=lambda: sync_tables_cloud("bivacchi", "editor_b"))
+    with col_r:
         st.markdown("### 🏠 Rifugi")
-        st.data_editor(st.session_state.rifugi[cr], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili, required=True)}, width="stretch", hide_index=True, key="editor_r", on_change=lambda: sync_tables_cloud("rifugi", "editor_r"))
+        st.data_editor(st.session_state.rifugi[["name_it", "ele", "stato_visita"]], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili)}, width="stretch", hide_index=True, key="editor_r", on_change=lambda: sync_tables_cloud("rifugi", "editor_r"))
+    with col_c:
+        if "cime" in st.session_state:
+            st.markdown("### ⛰️ Vette > 3000m")
+            cc = [c for c in ["name_it", "ele", "stato_visita"] if c in st.session_state.cime.columns]
+            st.data_editor(st.session_state.cime[cc], column_config={"stato_visita": st.column_config.SelectboxColumn("Stato", options=stati_disponibili)}, width="stretch", hide_index=True, key="editor_c", on_change=lambda: sync_tables_cloud("cime", "editor_c"))
