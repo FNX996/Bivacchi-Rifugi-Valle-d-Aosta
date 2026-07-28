@@ -23,10 +23,12 @@ import uuid
 import warnings
 import pandas as pd
 
+# Ignoriamo i warning innocui di Geopandas/Pyogrio
 warnings.filterwarnings("ignore", message=".*Several features with id.*")
 
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
 
+# CSS Avanzato per UI Blocker e Overlay di Caricamento
 st.markdown("""
     <style>
         iframe { opacity: 1 !important; filter: none !important; transition: none !important; }
@@ -69,6 +71,7 @@ st.markdown("""
             pointer-events: none;
         }
         
+        /* Nasconde il runner di default di Streamlit mantenendolo nel DOM */
         [data-testid="stStatusWidget"] {
             visibility: hidden;
         }
@@ -99,6 +102,7 @@ except Exception as e:
     st.error(f"Errore di connessione a Supabase: Verifica i Secrets. Dettaglio: {e}")
     st.stop()
 
+# Mappa globale colori per O(1) lookups istantanei
 COLOR_MAP = {"Visitato": "#28a745", "Pianificato": "#ffc107", "Non visitato": "#dc3545"}
 
 def calcola_distanza_haversine(lon1, lat1, lon2, lat2):
@@ -523,7 +527,7 @@ with tab_login:
         rec_pin = st.text_input("Il tuo PIN segreto", type="password")
         rec_nuova_pass = st.text_input("Scegli una Nuova Password", type="password")
         
-        if st.button("Reimposta Password"):
+        if st.button("Reimposta Password", width="stretch"):
             if rec_nome and rec_pin and rec_nuova_pass:
                 try:
                     response = supabase.table("utenti_credenziali").select("*").eq("utente", rec_nome).eq("pin_recupero", rec_pin).execute()
@@ -543,7 +547,7 @@ with tab_reg:
     password_nuova = st.text_input("Imposta una password", type="password")
     pin_sicurezza = st.text_input("PIN Segreto (serve per recuperare la password!)", type="password")
     
-    if st.button("Inizializza Profilo"):
+    if st.button("Inizializza Profilo", width="stretch"):
         if nome_nuovo.strip() and password_nuova.strip() and pin_sicurezza.strip():
             p_fmt = nome_nuovo.strip().title()
             if p_fmt in lista_profili: 
@@ -613,16 +617,16 @@ st.sidebar.markdown("""
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.6<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.7<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 9.6**
-    * 🗂️ **Riordino Archivio GPX:** Aggiunti filtri di visualizzazione, checkbox per selezione multipla, eliminazione massiva e cambio stato massivo.
-    * 📅 **Analisi Data GPX:** L'app ora scansiona i tag `<time>` dei GPX caricati. Se trova una data, imposta automaticamente la traccia come 'Svolta' e la mostra nell'archivio.
-    * 🗺️ **Riorganizzazione UI Mappa:** I controlli dei layer sono ora tutti concentrati *sopra* la mappa, mentre il calcolatore di itinerario si trova *sotto*.
+    **Versione 9.7**
+    * 🏆 **Classifica Esploratori:** Aggiunta la nuova scheda Classifica per confrontare statistiche, Km, D+ e Vette con tutta la community in stile Strava!
+    * ☑️ **Seleziona Tutte:** Nell'archivio GPX puoi ora selezionare o deselezionare in un solo clic tutte le tracce mostrate dai filtri.
+    * 🛠️ **Bug Fix:** Ottimizzato il codice e rimosso l'avviso di deprecazione 'use_container_width'.
     """)
 
 if "dati_caricati" not in st.session_state:
@@ -676,14 +680,14 @@ else:
 
 is_admin = st.session_state.get("profilo_attivo", "").strip().lower() in ["fabrizio", "fabrizio nori", "nori fabrizio", "bizzietto"]
 
-tabs_names = ["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX", "🌐 Community"]
+tabs_names = ["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX", "🌐 Community", "🏆 Classifica"]
 if is_admin: tabs_names.append("👑 Pannello Admin")
 
 tabs = st.tabs(tabs_names)
-tab_mappa, tab_registri, tab_gpx, tab_community = tabs[0], tabs[1], tabs[2], tabs[3]
+tab_mappa, tab_registri, tab_gpx, tab_community, tab_classifica = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
 
 if is_admin:
-    tab_admin = tabs[4]
+    tab_admin = tabs[5]
     with tab_admin:
         st.subheader("👑 Pannello di Controllo Feedback")
         feedbacks = fetch_feedback_admin()
@@ -700,6 +704,65 @@ if is_admin:
                         if delete_feedback_admin(fb.get("id")):
                             st.toast("Feedback archiviato!", icon="✅")
                             st.rerun()
+
+with tab_classifica:
+    st.subheader("🏆 Classifica Esploratori")
+    st.markdown("Confronta le tue statistiche globali con quelle della community! L'ordine di default è per **Dislivello Totale (D+)**, il vero metro dell'alpinista.")
+    
+    with st.spinner("Calcolo delle classifiche in corso..."):
+        biv_names = list(st.session_state.bivacchi['name_it'].dropna().unique())
+        rif_names = list(st.session_state.rifugi['name_it'].dropna().unique())
+        cime_names = list(st.session_state.cime['name_it'].dropna().unique()) if "cime" in st.session_state else []
+        
+        try:
+            res_tracce = supabase.table("tracce_gpx").select("utente, dati_json").execute()
+            res_visite = supabase.table("stato_visite").select("utente, nome_struttura").eq("stato", "Visitato").execute()
+            
+            stats = {}
+            for row in res_tracce.data:
+                u = row.get("utente", "Anonimo")
+                if u not in stats: stats[u] = {"Utente": u, "Km Percorsi": 0.0, "D+ (m)": 0, "Tracce Svolte": 0, "Bivacchi": 0, "Rifugi": 0, "Vette >3000m": 0}
+                
+                dati = row.get("dati_json", {})
+                if dati.get("stato") == "Svolta":
+                    stats[u]["Tracce Svolte"] += 1
+                    stats[u]["Km Percorsi"] += float(dati.get("dist", 0))
+                    stats[u]["D+ (m)"] += int(dati.get("d_pos", 0))
+            
+            for row in res_visite.data:
+                u = row.get("utente", "Anonimo")
+                if u not in stats: stats[u] = {"Utente": u, "Km Percorsi": 0.0, "D+ (m)": 0, "Tracce Svolte": 0, "Bivacchi": 0, "Rifugi": 0, "Vette >3000m": 0}
+                
+                nome = row.get("nome_struttura")
+                if nome in biv_names: stats[u]["Bivacchi"] += 1
+                elif nome in rif_names: stats[u]["Rifugi"] += 1
+                elif nome in cime_names: stats[u]["Vette >3000m"] += 1
+            
+            if stats:
+                df_classifica = pd.DataFrame(list(stats.values()))
+                df_classifica["Km Percorsi"] = df_classifica["Km Percorsi"].round(1)
+                
+                ordinamento = st.selectbox("Ordina classifica per:", ["D+ (m)", "Km Percorsi", "Vette >3000m", "Tracce Svolte", "Rifugi", "Bivacchi"])
+                df_classifica = df_classifica.sort_values(by=ordinamento, ascending=False).reset_index(drop=True)
+                df_classifica.index = df_classifica.index + 1
+                
+                st.dataframe(
+                    df_classifica, 
+                    width="stretch",
+                    column_config={
+                        "Utente": st.column_config.TextColumn("Esploratore 🧗‍♂️"),
+                        "D+ (m)": st.column_config.ProgressColumn("Dislivello D+ (m)", format="%d m", min_value=0, max_value=int(df_classifica["D+ (m)"].max() or 1)),
+                        "Km Percorsi": st.column_config.NumberColumn("Distanza (km)", format="%.1f km"),
+                        "Vette >3000m": st.column_config.ProgressColumn("Vette >3000m", format="%d ⛰️", min_value=0, max_value=int(df_classifica["Vette >3000m"].max() or 1)),
+                        "Tracce Svolte": st.column_config.NumberColumn("Tracce Svolte", format="%d 🗺️"),
+                        "Rifugi": st.column_config.NumberColumn("Rifugi", format="%d 🏠"),
+                        "Bivacchi": st.column_config.NumberColumn("Bivacchi", format="%d ⛺")
+                    }
+                )
+            else:
+                st.info("Nessun dato disponibile per la classifica.")
+        except Exception as e:
+            st.error(f"Errore nel caricamento della classifica: {e}")
 
 with tab_gpx:
     st.subheader("📂 Il tuo Archivio GPX Personale")
@@ -794,7 +857,15 @@ with tab_gpx:
             if filtro_stato == "Tutte" or (filtro_stato == "Svolte" and stato == "Svolta") or (filtro_stato == "Pianificate" and stato == "Pianificata"):
                 tracce_filtrate.append(nome)
                 
-        # Valutazione stato checkbox per azioni bulk
+        if tracce_filtrate:
+            c_sel1, c_sel2, _ = st.columns([2, 2, 6])
+            if c_sel1.button("☑️ Seleziona Tutte", width="stretch"):
+                for t in tracce_filtrate: st.session_state[f"bulk_chk_{t}"] = True
+                st.rerun()
+            if c_sel2.button("🔳 Deseleziona Tutte", width="stretch"):
+                for t in tracce_filtrate: st.session_state[f"bulk_chk_{t}"] = False
+                st.rerun()
+                
         tracce_selezionate = [t for t in tracce_filtrate if st.session_state.get(f"bulk_chk_{t}", False)]
             
         if tracce_selezionate:
@@ -843,7 +914,6 @@ with tab_gpx:
             elif stato_traccia == "Svolta":
                 titolo_expander += " (Svolta)"
             
-            # Layout con Checkbox affiancata all'Expander
             col_chk, col_exp = st.columns([0.5, 9.5])
             with col_chk:
                 st.markdown('<div class="gpx-checkbox-container">', unsafe_allow_html=True)
