@@ -323,6 +323,14 @@ def get_val(row, col, default="N/D"):
     val_str = str(val).strip()
     return val_str if val_str and val_str not in ["None", "nan"] else default
 
+# PROTEZIONE LOG: Trasforma valori NaN o corrotti in float 0.0 sicuri
+def safe_float(val, default=0.0):
+    try:
+        v = float(val)
+        return default if math.isnan(v) else v
+    except (ValueError, TypeError):
+        return default
+
 def genera_gpx(coordinate_geometria, nome_itinerario="Itinerario VdA"):
     gpx = ['<?xml version="1.0" encoding="UTF-8"?>', '<gpx version="1.1" creator="VdA_Explorer" xmlns="http://www.topografix.com/GPX/1/1">', '  <trk>', f'    <name>{nome_itinerario}</name>', '    <trkseg>']
     gpx.extend([f'      <trkpt lat="{lat}" lon="{lon}"></trkpt>' for lon, lat in coordinate_geometria])
@@ -617,16 +625,16 @@ st.sidebar.markdown("""
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.7<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.8<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 9.7**
-    * 🏆 **Classifica Esploratori:** Aggiunta la nuova scheda Classifica per confrontare statistiche, Km, D+ e Vette con tutta la community in stile Strava!
-    * ☑️ **Seleziona Tutte:** Nell'archivio GPX puoi ora selezionare o deselezionare in un solo clic tutte le tracce mostrate dai filtri.
-    * 🛠️ **Bug Fix:** Ottimizzato il codice e rimosso l'avviso di deprecazione 'use_container_width'.
+    **Versione 9.8**
+    * 🛡️ **Protezione Anti-Crash:** Aggiunto un controllo sui dati di quota (NaN/Null) per evitare chiusure impreviste della Mappa.
+    * 🏆 **Classifica Esploratori:** Confronta statistiche, Km, D+ e Vette con tutta la community in stile Strava!
+    * ☑️ **Selezione Multipla GPX:** Ora puoi selezionare/deselezionare con un clic tutte le tracce presenti in archivio.
     """)
 
 if "dati_caricati" not in st.session_state:
@@ -655,7 +663,7 @@ if "dati_caricati" not in st.session_state:
             dfs_da_unire.append(st.session_state.cime)
             
         st.session_state.dizionario_strutture = {
-            str(row.get("name_it")): (row.geometry.y, row.geometry.x, float(row.get("ele", 0))) 
+            str(row.get("name_it")): (row.geometry.y, row.geometry.x, safe_float(row.get("ele"))) 
             for df in dfs_da_unire for _, row in df.iterrows() if pd.notna(row.get("name_it"))
         }
         
@@ -726,8 +734,8 @@ with tab_classifica:
                 dati = row.get("dati_json", {})
                 if dati.get("stato") == "Svolta":
                     stats[u]["Tracce Svolte"] += 1
-                    stats[u]["Km Percorsi"] += float(dati.get("dist", 0))
-                    stats[u]["D+ (m)"] += int(dati.get("d_pos", 0))
+                    stats[u]["Km Percorsi"] += safe_float(dati.get("dist", 0))
+                    stats[u]["D+ (m)"] += int(safe_float(dati.get("d_pos", 0)))
             
             for row in res_visite.data:
                 u = row.get("utente", "Anonimo")
@@ -1248,14 +1256,15 @@ with tab_mappa:
             dtm_sel = "DTM_vda.tif" if os.path.exists("DTM_vda.tif") else None
             if dtm_sel:
                 try:
-                    with rasterio.open(dtm_sel) as ds: q_n = [v[0] for v in ds.sample([(lon_n, lat_n)])][0]
+                    with rasterio.open(dtm_sel) as ds: q_n = safe_float([v[0] for v in ds.sample([(lon_n, lat_n)])][0])
                 except: pass
 
     if n_cliccato:
         st.markdown("---")
         ci, cm = st.columns([1.5, 1])
         with ci:
-            st.markdown(f"### 📍 `{n_cliccato}` (Quota: {round(q_n)}m)")
+            safe_q_n = round(safe_float(q_n))
+            st.markdown(f"### 📍 `{n_cliccato}` (Quota: {safe_q_n}m)")
             cp, ct, ca = st.columns(3)
             if cp.button("🛫 Partenza", width="stretch"): st.session_state.itinerario_struttura["partenza"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
             if ct.button("🛑 Tappa", width="stretch") and (n_cliccato, lat_n, lon_n, q_n) not in st.session_state.itinerario_struttura["tappe"]: st.session_state.itinerario_struttura["tappe"].append((n_cliccato, lat_n, lon_n, q_n)); st.rerun()
@@ -1278,7 +1287,7 @@ with tab_mappa:
             distanze.sort(key=lambda x: x[1])
             for i, (nm, d, q) in enumerate(distanze[:3]):
                 dist_txt = f"{round(d*1000)} m" if d < 1 else f"{round(d, 1)} km"
-                st.markdown(f"**{i+1}. {nm}** ({round(q)}m) a 📏 {dist_txt}")
+                st.markdown(f"**{i+1}. {nm}** ({round(safe_float(q))}m) a 📏 {dist_txt}")
 
         with cm:
             st.markdown("🌤️ **Previsioni a 3 giorni**")
