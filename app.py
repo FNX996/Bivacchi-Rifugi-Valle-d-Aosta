@@ -380,11 +380,13 @@ def salva_traccia_gpx(utente, nome, descrizione, visibile, dati_json):
         st.error(f"Errore salvataggio GPX in cloud: {e}")
         return False
 
+# BUG FIX 1: Rename GPX without creating duplicates
 def rinomina_traccia_gpx(utente, vecchio_nome, nuovo_nome):
     try:
         res = supabase.table("tracce_gpx").select("id").eq("utente", utente).eq("nome", vecchio_nome).execute()
         if res.data:
-            supabase.table("tracce_gpx").update({"nome": nuovo_nome}).eq("id", res.data[0]["id"]).execute()
+            for row in res.data:
+                supabase.table("tracce_gpx").update({"nome": nuovo_nome}).eq("id", row["id"]).execute()
             return True
         return False
     except Exception as e:
@@ -400,9 +402,11 @@ def fetch_community_tracks():
     except:
         return []
 
-def autosave_quick_edit():
-    nuovo_stato = st.session_state.quick_edit_selectbox
-    struttura, profilo = st.session_state.struttura_attiva, st.session_state.profilo_attivo
+# BUG FIX 4: Reactive quick edit callback for map structure status
+def autosave_quick_edit_for(struttura):
+    nuovo_stato = st.session_state.get(f"quick_edit_{struttura}")
+    if not nuovo_stato: return
+    profilo = st.session_state.profilo_attivo
     dfs = ["bivacchi", "rifugi"]
     if "cime" in st.session_state: dfs.append("cime")
     
@@ -415,8 +419,9 @@ def autosave_quick_edit():
                 break
     try:
         supabase.table("stato_visite").upsert({"nome_struttura": struttura, "stato": nuovo_stato, "utente": profilo}).execute()
-        st.toast(f"☁️ Autosave Cloud: {struttura} → {nuovo_stato}", icon="✅")
-    except: st.error("Errore di sincronizzazione Cloud")
+        st.toast(f"☁️ Cloud: {struttura} → {nuovo_stato}", icon="✅")
+    except Exception as e:
+        st.error("Errore di sincronizzazione Cloud")
 
 def sync_tables_cloud(df_name, editor_key):
     edits = st.session_state[editor_key].get("edited_rows", {})
@@ -483,7 +488,19 @@ if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", wi
 st.sidebar.markdown("### 👤 Profilo Utente")
 lista_profili = fetch_profili_esistenti()
 
-if "autenticato" not in st.session_state: st.session_state.autenticato = False
+# BUG FIX 3: Persistent login across page refreshes via st.query_params
+if "autenticato" not in st.session_state: 
+    st.session_state.autenticato = False
+
+query_user = st.query_params.get("user")
+if query_user and not st.session_state.autenticato:
+    if query_user in lista_profili:
+        st.session_state.profilo_attivo = query_user
+        st.session_state.autenticato = True
+
+if st.session_state.autenticato and st.session_state.get("profilo_attivo"):
+    st.query_params["user"] = st.session_state.profilo_attivo
+
 if "itinerario_struttura" not in st.session_state: st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
 
 tab_login, tab_reg = st.sidebar.tabs(["🔑 Accedi", "📝 Registrati"])
@@ -512,12 +529,14 @@ with tab_login:
                         if nuovo_pin:
                             supabase.table("utenti_credenziali").update({"pin_recupero": nuovo_pin}).eq("utente", st.session_state.profilo_attivo).execute()
                             st.session_state.autenticato = True
+                            st.query_params["user"] = st.session_state.profilo_attivo
                             st.success("PIN salvato! Accesso eseguito.")
                             st.rerun()
                         else:
                             st.error("Inserisci un PIN valido.")
                 else:
                     st.session_state.autenticato = True
+                    st.query_params["user"] = st.session_state.profilo_attivo
                     st.toast("🔓 Accesso eseguito!", icon="🔑")
                     st.rerun()
             else: st.error("❌ Password errata!")
@@ -555,6 +574,7 @@ with tab_reg:
                 st.error("❌ Profilo già esistente!")
             elif registra_nuovo_utente(p_fmt, password_nuova.strip(), pin_sicurezza.strip()):
                 st.session_state.profilo_attivo, st.session_state.autenticato = p_fmt, True
+                st.query_params["user"] = p_fmt
                 if "dati_caricati" in st.session_state: del st.session_state["dati_caricati"]
                 st.success("Profilo creato! Ora sei loggato.")
                 st.rerun()
@@ -584,6 +604,7 @@ if st.session_state.get("autenticato"):
         if st.button("🗑️ Elimina Profilo Definitivamente", type="primary", disabled=not conferma_eliminazione, width="stretch"):
             try:
                 supabase.table("utenti_credenziali").delete().eq("utente", st.session_state.profilo_attivo).execute()
+                st.query_params.clear()
                 st.session_state.clear()
                 st.rerun()
             except Exception as e:
@@ -618,16 +639,16 @@ st.sidebar.markdown("""
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.9<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.9 Pro<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 9.9 (Ultra-Fast Edition)**
-    * ⚡ **Velocità Istantanea:** Sfruttato il nuovo `@st.fragment` di Streamlit. Cliccare sulla Mappa o selezionare le checkbox GPX ora richiede millisecondi invece di ricaricare tutto!
-    * 🗺️ **Re-Layout Mappa:** I comandi per i layer (Vette, Sentieri, Rifugi, ecc.) sono stati posizionati *sopra* la mappa, con il pianificatore in basso per un flusso più naturale.
-    * 🗑️ **Fix Eliminazione Traccia:** Risolto in via definitiva il bug che bloccava la cancellazione della singola traccia GPX.
+    **Versione 9.9 Pro**
+    * 🔑 **Sessione Persistente:** L'accesso rimane salvato anche dopo aver aggiornato la pagina!
+    * ⚡ **Aggiornamenti Mappa Reattivi:** Cambiare lo stato di un bivacco, rifugio o cima aggiorna immediatamente la mappa senza ricaricare la pagina.
+    * ✏️ **Rinomina & Cancellazione Istantanea:** Corretto il bug dei doppioni per le tracce rinominate e velocizzata l'eliminazione singola in 1 solo clic.
     """)
 
 if "dati_caricati" not in st.session_state:
@@ -671,13 +692,6 @@ if st.session_state.sentieri is not None:
         grafo_motore, nodi_motore, albero_motore = prepara_motore_routing(st.session_state.sentieri)
 
 dizionario_strutture = st.session_state.dizionario_strutture
-
-mappa_bivacchi = st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'].isin(stati_selezionati)]
-mappa_rifugi = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].isin(stati_selezionati)]
-if "cime" in st.session_state:
-    mappa_cime = st.session_state.cime[st.session_state.cime['stato_visita'].isin(stati_selezionati)]
-else:
-    mappa_cime = pd.DataFrame()
 
 is_admin = st.session_state.get("profilo_attivo", "").strip().lower() in ["fabrizio", "fabrizio nori", "nori fabrizio", "bizzietto"]
 
@@ -879,13 +893,13 @@ def pannello_gpx():
                     if not st.session_state.tracce_gpx[t]["dati"].get("data_svolgimento"):
                         st.session_state.tracce_gpx[t]["dati"]["data_svolgimento"] = datetime.today().strftime("%Y-%m-%d")
                     salva_traccia_gpx(st.session_state.profilo_attivo, t, st.session_state.tracce_gpx[t]["descrizione"], st.session_state.tracce_gpx[t]["visibile"], st.session_state.tracce_gpx[t]["dati"])
-                    if f"bulk_chk_{t}" in st.session_state: del st.session_state[f"bulk_chk_{t}"]
+                    st.session_state.pop(f"bulk_chk_{t}", None)
                 st.rerun()
             if c_act2.button("⏳ Segna come Pianificate", width="stretch"):
                 for t in tracce_selezionate:
                     st.session_state.tracce_gpx[t]["dati"]["stato"] = "Pianificata"
                     salva_traccia_gpx(st.session_state.profilo_attivo, t, st.session_state.tracce_gpx[t]["descrizione"], st.session_state.tracce_gpx[t]["visibile"], st.session_state.tracce_gpx[t]["dati"])
-                    if f"bulk_chk_{t}" in st.session_state: del st.session_state[f"bulk_chk_{t}"]
+                    st.session_state.pop(f"bulk_chk_{t}", None)
                 st.rerun()
             if c_act3.button("🗑️ Elimina Selezionate", width="stretch", type="primary"):
                 try:
@@ -893,6 +907,7 @@ def pannello_gpx():
                     for t in tracce_selezionate:
                         st.session_state.tracce_gpx.pop(t, None)
                         st.session_state.pop(f"bulk_chk_{t}", None)
+                    st.toast(f"Eliminate {len(tracce_selezionate)} tracce!", icon="🗑️")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore eliminazione multipla: {e}")
@@ -926,11 +941,16 @@ def pannello_gpx():
                 with st.expander(titolo_expander, expanded=False):
                     c_ren, c_btn, c_mod = st.columns([2, 1, 1])
                     nuovo_nome = c_ren.text_input("Nuovo nome traccia:", value=nome_traccia, key=f"ren_{nome_traccia}", label_visibility="collapsed")
+                    
+                    # BUG FIX 1: Rename track cleanly without creating duplicates
                     if c_btn.button("✏️ Rinomina", key=f"btn_ren_{nome_traccia}", width="stretch"):
-                        if nuovo_nome != nome_traccia and nuovo_nome.strip() != "":
-                            if rinomina_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, nuovo_nome):
-                                st.session_state.tracce_gpx[nuovo_nome] = st.session_state.tracce_gpx.pop(nome_traccia)
-                                if f"bulk_chk_{nome_traccia}" in st.session_state: del st.session_state[f"bulk_chk_{nome_traccia}"]
+                        nuovo_nome_fmt = nuovo_nome.strip()
+                        if nuovo_nome_fmt != nome_traccia and nuovo_nome_fmt != "":
+                            if rinomina_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, nuovo_nome_fmt):
+                                st.session_state.tracce_gpx[nuovo_nome_fmt] = st.session_state.tracce_gpx.pop(nome_traccia)
+                                for k_pref in ["bulk_chk_", "ren_", "stato_", "desc_", "vis_", "share_", "date_", "strut_", "desc_pub_", "foto_", "btn_ren_", "edit_plan_"]:
+                                    st.session_state.pop(f"{k_pref}{nome_traccia}", None)
+                                st.toast(f"Traccia rinominata in '{nuovo_nome_fmt}'!", icon="✏️")
                                 st.rerun()
                                 
                     if c_mod.button("✏️ Modifica su Mappa", key=f"edit_plan_{nome_traccia}", width="stretch"):
@@ -1017,11 +1037,14 @@ def pannello_gpx():
                             salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, info["descrizione"], info["visibile"], st.session_state.tracce_gpx[nome_traccia]["dati"])
                             st.rerun()
                         
+                    # BUG FIX 2: Instant single track deletion in 1 click
                     if st.button("❌ Elimina definitivamente", key=f"del_{nome_traccia}"):
                         try:
                             supabase.table("tracce_gpx").delete().eq("utente", st.session_state.profilo_attivo).eq("nome", nome_traccia).execute()
                             st.session_state.tracce_gpx.pop(nome_traccia, None)
-                            st.session_state.pop(f"bulk_chk_{nome_traccia}", None)
+                            for k_pref in ["bulk_chk_", "ren_", "stato_", "desc_", "vis_", "share_", "date_", "strut_", "desc_pub_", "foto_", "del_", "btn_ren_", "edit_plan_"]:
+                                st.session_state.pop(f"{k_pref}{nome_traccia}", None)
+                            st.toast(f"Traccia '{nome_traccia}' eliminata!", icon="🗑️")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Errore eliminazione: {e}")
@@ -1101,6 +1124,14 @@ def pannello_mappa():
     mostra_rifugi = col_t3.toggle("🏠 Rifugi", value=True, key="mostra_rifugi_toggle")
     mostra_bivacchi = col_t4.toggle("⛺ Bivacchi", value=True, key="mostra_bivacchi_toggle")
     
+    # BUG FIX 4: Filter layers dynamically inside fragment for immediate re-renders
+    mappa_bivacchi_f = st.session_state.bivacchi[st.session_state.bivacchi['stato_visita'].isin(stati_selezionati)]
+    mappa_rifugi_f = st.session_state.rifugi[st.session_state.rifugi['stato_visita'].isin(stati_selezionati)]
+    if "cime" in st.session_state:
+        mappa_cime_f = st.session_state.cime[st.session_state.cime['stato_visita'].isin(stati_selezionati)]
+    else:
+        mappa_cime_f = pd.DataFrame()
+
     m = folium.Map(location=[45.73, 7.32], zoom_start=9, tiles=None)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite (Esri)', overlay=False).add_to(m)
     folium.TileLayer('OpenStreetMap', name='Topografica (OSM)', overlay=False).add_to(m)
@@ -1160,13 +1191,13 @@ def pannello_mappa():
         folium.Marker([t[1], t[2]], tooltip=f"TAPPA: {t[0]}", icon=folium.DivIcon(html="<div style='background:#ff8800; width:40px; height:40px; border-radius:50%; border:3px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); font-size:18px; color:white;'>🛑</div>", icon_size=(40, 40), icon_anchor=(20, 20))).add_to(m)
 
     if mostra_bivacchi:
-        for _, r in mappa_bivacchi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
+        for _, r in mappa_bivacchi_f.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>⛺</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     
     if mostra_rifugi:
-        for _, r in mappa_rifugi.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
+        for _, r in mappa_rifugi_f.iterrows(): folium.Marker([r.geometry.y, r.geometry.x], popup=folium.Popup(crea_popup_veloce(r)), tooltip=get_val(r, "name_it"), icon=folium.DivIcon(html=f"<div style='background:{col_st(get_val(r, 'stato_visita'))}; width:30px; height:30px; border-radius:6px; border:2px solid white; display:flex; align-items:center; justify-content:center; font-size:14px;'>🏠</div>", icon_size=(30, 30), icon_anchor=(15, 15))).add_to(m)
     
-    if mostra_cime and not mappa_cime.empty:
-        for _, r in mappa_cime.iterrows():
+    if mostra_cime and not mappa_cime_f.empty:
+        for _, r in mappa_cime_f.iterrows():
             ele_cima = float(get_val(r, "ele", 0))
             colore_cima = "black" if ele_cima >= 4000 else "#0055ff"
             stato_col = col_st(get_val(r, 'stato_visita'))
@@ -1269,12 +1300,21 @@ def pannello_mappa():
             if ct.button("🛑 Tappa", width="stretch") and (n_cliccato, lat_n, lon_n, q_n) not in st.session_state.itinerario_struttura["tappe"]: st.session_state.itinerario_struttura["tappe"].append((n_cliccato, lat_n, lon_n, q_n)); st.rerun()
             if ca.button("🛬 Arrivo", width="stretch"): st.session_state.itinerario_struttura["arrivo"] = (n_cliccato, lat_n, lon_n, q_n); st.rerun()
 
+            # BUG FIX 4: Reactive status modification directly from map
             if clk_t:
                 st.session_state.struttura_attiva = clk_t
                 dfs_attuali = [st.session_state.bivacchi, st.session_state.rifugi]
                 if "cime" in st.session_state: dfs_attuali.append(st.session_state.cime)
                 st_corr = next((r["stato_visita"] for df in dfs_attuali for _, r in df.iterrows() if str(r.get("name_it")) == clk_t), "Non visitato")
-                st.selectbox("Modifica stato cloud:", options=stati_disponibili, index=stati_disponibili.index(st_corr), key="quick_edit_selectbox", on_change=autosave_quick_edit)
+                idx_st = stati_disponibili.index(st_corr) if st_corr in stati_disponibili else 0
+                st.selectbox(
+                    "Modifica stato cloud:",
+                    options=stati_disponibili,
+                    index=idx_st,
+                    key=f"quick_edit_{clk_t}",
+                    on_change=autosave_quick_edit_for,
+                    args=(clk_t,)
+                )
 
             st.markdown("#### 🎯 Radar Esplorazione")
             distanze = []
