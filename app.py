@@ -22,7 +22,10 @@ import io
 import uuid
 import warnings
 import pandas as pd
+import hmac
+import hashlib
 
+# Ignoriamo i warning innocui di Geopandas/Pyogrio
 warnings.filterwarnings("ignore", message=".*Several features with id.*")
 
 st.set_page_config(page_title="Pianificazione VdA", layout="wide")
@@ -91,7 +94,26 @@ except Exception as e:
 
 COLOR_MAP = {"Visitato": "#28a745", "Pianificato": "#ffc107", "Non visitato": "#dc3545"}
 
-# --- CACHE APERTURA DTM (ELIMINA IL BLOCCO SUI CLIC DELLA MAPPA) ---
+def genera_token_sessione(utente: str, pwd_db: str) -> str:
+    """Genera un token crittografico HMAC-SHA256 legato univocamente all'utente e alla sua password."""
+    secret = st.secrets["supabase"]["key"].encode("utf-8")
+    msg = f"{utente}:{pwd_db}".encode("utf-8")
+    return hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+def valida_token_sessione(utente: str, token: str) -> bool:
+    """Valida crittograficamente il token di sessione confrontandolo con l'HMAC atteso."""
+    if not utente or not token:
+        return False
+    try:
+        res = supabase.table("utenti_credenziali").select("password").eq("utente", utente).execute()
+        if res.data and len(res.data) > 0:
+            pwd_db = res.data[0].get("password")
+            expected_token = genera_token_sessione(utente, pwd_db)
+            return hmac.compare_digest(str(token), str(expected_token))
+    except Exception:
+        return False
+    return False
+
 @st.cache_resource
 def get_dtm_dataset():
     for f in ["DTM_vda.tif", "DTM_vda"]:
@@ -269,7 +291,6 @@ def open_3d_viewer(points, quote, nome):
         ),
         margin=dict(l=0, r=0, b=0, t=0), height=500, showlegend=False
     )
-    # FIX: unique element ID key
     st.plotly_chart(fig, use_container_width=True, key=f"3d_plot_{uuid.uuid4().hex}")
 
 def fetch_profili_esistenti():
@@ -330,7 +351,6 @@ def comprimi_e_salva_foto(file_uploader_objects):
             st.error(f"Errore caricamento foto {file.name}: {e}")
     return urls
 
-# Memorizza anche l'ID DB per ogni traccia
 def carica_tracce_gpx_cloud(utente):
     try:
         res = supabase.table("tracce_gpx").select("id, nome, descrizione, visibile, dati_json").eq("utente", utente).execute()
@@ -368,7 +388,6 @@ def salva_traccia_gpx(utente, nome, descrizione, visibile, dati_json, track_id=N
         st.error(f"Errore salvataggio GPX in cloud: {e}")
         return None
 
-# Eliminazione atomica per ID (elimina al 1° clic garantito)
 def elimina_traccia_gpx_db(track_id, nome, utente):
     try:
         if track_id:
@@ -492,7 +511,6 @@ def calcola_percorso_locale(G, albero, nodi, punti_coords):
         return {'geometry': {'type': 'LineString', 'coordinates': traccia_totale}, 'distance': distanza_km * 1000}
     except nx.NetworkXNoPath: return None
 
-# --- SIDEBAR & SESSIONE ---
 if os.path.exists("immagine_app.jpeg"): st.sidebar.image("immagine_app.jpeg", use_container_width=True)
 
 st.sidebar.markdown("### 👤 Profilo Utente")
@@ -501,13 +519,51 @@ lista_profili = fetch_profili_esistenti()
 if "autenticato" not in st.session_state: 
     st.session_state.autenticato = False
 
+# --- CONTROLLO SICUREZZA CRITTOGRAFICA DELLA SESSIONE ---
 query_user = st.query_params.get("user")
-if query_user and not st.session_state.autenticato and query_user in lista_profili:
-    st.session_state.profilo_attivo = query_user
-    st.session_state.autenticato = True
+query_token = st.query_params.get("session_token")
 
-if st.session_state.autenticato and st.session_state.get("profilo_attivo"):
-    st.query_params["user"] = st.session_state.profilo_attivo
+# Se non siamo autenticati in session_state, verifichiamo la validità del token crittografico
+if not st.session_state.autenticato:
+    if query_user and query_token and query_user in lista_profili:
+        if valida_token_sessione(query_user, query_token):
+            st.session_state.profilo_attivo = query_user
+            st.session_state.autenticato = True
+        else:
+            # Token errato o contraffatto: azzera tutto per sicurezza
+            st.query_params.clear()
+            st.session_state.autenticato = False
+            st.session_state.profilo_attivo = None
+    elif query_user and not query_token:
+        # Se viene passato solo il nome utente senza token valido, non loggare MAI in automatico!
+        st.query_params.clear()
+        st.session_state.autenticato = False
+        st.session_state.profilo_attivo = None
+
+# Se l'utente era già loggato ma cambia l'URL (es: cambia '?user=AltroNome')
+if st.session_state.autenticato:
+    if query_user and query_user != st.session_state.get("profilo_attivo"):
+        # Tentativo di cambio profilo dall'URL: deve fornire il token valido per quel nuovo utente
+        if query_token and valida_token_sessione(query_user, query_token):
+            st.session_state.profilo_attivo = query_user
+            st.session_state.pop("dati_caricati", None)
+            st.rerun()
+        else:
+            # Accesso abusivo o token non corrispondente: disconnetti immediatamente!
+            st.query_params.clear()
+            st.session_state.clear()
+            st.warning("⚠️ Tentativo di cambio profilo non autorizzato: sessione terminata.")
+            st.rerun()
+    elif not query_token and st.session_state.get("profilo_attivo"):
+        # Se manca il token nei parametri ma la sessione è autenticata, ripristina token valido
+        try:
+            res_p = supabase.table("utenti_credenziali").select("password").eq("utente", st.session_state.profilo_attivo).execute()
+            if res_p.data:
+                token_valido = genera_token_sessione(st.session_state.profilo_attivo, res_p.data[0]["password"])
+                st.query_params["user"] = st.session_state.profilo_attivo
+                st.query_params["session_token"] = token_valido
+        except Exception:
+            pass
 
 if "itinerario_struttura" not in st.session_state: 
     st.session_state.itinerario_struttura = {"partenza": None, "tappe": [], "arrivo": None}
@@ -528,6 +584,7 @@ with tab_login:
         if pwd := st.text_input(f"Password per {st.session_state.profilo_attivo}:", type="password", key="pass_field"):
             valido, pin_esistente = verifica_password(st.session_state.profilo_attivo, pwd)
             if valido:
+                token_autenticato = genera_token_sessione(st.session_state.profilo_attivo, pwd)
                 if not pin_esistente:
                     st.warning("⚠️ Imposta un PIN di sicurezza per il recupero password.")
                     nuovo_pin = st.text_input("Scegli un PIN Segreto", type="password", key="new_pin_upgrade")
@@ -536,11 +593,13 @@ with tab_login:
                             supabase.table("utenti_credenziali").update({"pin_recupero": nuovo_pin}).eq("utente", st.session_state.profilo_attivo).execute()
                             st.session_state.autenticato = True
                             st.query_params["user"] = st.session_state.profilo_attivo
+                            st.query_params["session_token"] = token_autenticato
                             st.rerun()
                         else: st.error("Inserisci un PIN valido.")
                 else:
                     st.session_state.autenticato = True
                     st.query_params["user"] = st.session_state.profilo_attivo
+                    st.query_params["session_token"] = token_autenticato
                     st.toast("🔓 Accesso eseguito!", icon="🔑")
                     st.rerun()
             else: st.error("❌ Password errata!")
@@ -567,8 +626,10 @@ with tab_reg:
             p_fmt = nome_nuovo.strip().title()
             if p_fmt in lista_profili: st.error("❌ Profilo già esistente!")
             elif registra_nuovo_utente(p_fmt, password_nuova.strip(), pin_sicurezza.strip()):
+                token_reg = genera_token_sessione(p_fmt, password_nuova.strip())
                 st.session_state.profilo_attivo, st.session_state.autenticato = p_fmt, True
                 st.query_params["user"] = p_fmt
+                st.query_params["session_token"] = token_reg
                 st.session_state.pop("dati_caricati", None)
                 st.success("Profilo creato con successo!")
                 st.rerun()
@@ -580,12 +641,18 @@ if not st.session_state.get("profilo_attivo") or not st.session_state.autenticat
 
 if st.session_state.get("autenticato"):
     st.sidebar.divider()
+    if st.sidebar.button("🚪 Disconnetti", use_container_width=True):
+        st.query_params.clear()
+        st.session_state.clear()
+        st.rerun()
+
     with st.sidebar.expander("⚙️ Impostazioni Account"):
         vecchia_pwd = st.text_input("Password attuale", type="password")
         nuova_pwd = st.text_input("Nuova password", type="password")
         if st.button("Aggiorna Password", use_container_width=True):
             if verifica_password(st.session_state.profilo_attivo, vecchia_pwd)[0]:
                 supabase.table("utenti_credenziali").update({"password": nuova_pwd}).eq("utente", st.session_state.profilo_attivo).execute()
+                st.query_params["session_token"] = genera_token_sessione(st.session_state.profilo_attivo, nuova_pwd)
                 st.success("Password aggiornata!")
             else: st.error("Password attuale errata.")
         st.divider()
@@ -620,20 +687,19 @@ st.sidebar.markdown("""
     </ul>
 </div>
 <div style="font-size: 13px; color: #555; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #333; margin-bottom: 15px;">
-    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.9.5 Pro<br>Autore: Nori Fabrizio
+    <b>App Rifugi & Bivacchi VdA</b><br>Versione: 9.9.6 Pro<br>Autore: Nori Fabrizio
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar.expander("🆕 Changelog & Novità", expanded=False):
     st.markdown("""
-    **Versione 9.9.5 Pro**
+    **Versione 9.9.6 Pro**
+    * 🔒 **Sicurezza Sessione HMAC:** Il login persistente è ora protetto da token crittografici SHA-256 univoci. La modifica manuale del nome utente nell'indirizzo URL provoca l'immediata disconnessione e richiede la password.
     * ⚡ **Mappa Istantanea:** Clic reattivi senza latenze DTM.
     * 🎯 **Radar Vettorializzato:** Calcolo strutture vicine in tempo reale (<1ms).
     * 🗑️ **Eliminazione GPX Atomica:** Cancellazione sicura e definitiva al 1° clic.
-    * 📊 **Grafici Altimetrici Ripristinati:** Rendering garantito senza conflitti di ID.
     """)
 
-# --- INIZIALIZZAZIONE DATI IN CACHE ---
 if "dati_caricati" not in st.session_state:
     stati_cloud = fetch_stati_dal_db(st.session_state.profilo_attivo)
     st.session_state.tracce_gpx = carica_tracce_gpx_cloud(st.session_state.profilo_attivo)
@@ -683,9 +749,6 @@ tabs_names = ["🗺️ Mappa & Itinerari", "📊 Registri", "📂 Archivio GPX",
 if is_admin: tabs_names.append("👑 Pannello Admin")
 tabs = st.tabs(tabs_names)
 
-# ==========================================
-# 👑 TAB ADMIN
-# ==========================================
 if is_admin and len(tabs) > 5:
     with tabs[5]:
         st.subheader("👑 Pannello di Controllo Feedback")
@@ -704,9 +767,6 @@ if is_admin and len(tabs) > 5:
                             st.toast("Feedback archiviato!", icon="✅")
                             st.rerun()
 
-# ==========================================
-# 🏆 TAB CLASSIFICA
-# ==========================================
 with tabs[4]:
     st.subheader("🏆 Classifica Esploratori")
     st.markdown("Confronta le tue statistiche globali con quelle della community! L'ordine di default è per **Dislivello Totale (D+)**.")
@@ -760,9 +820,6 @@ with tabs[4]:
             else: st.info("Nessun dato disponibile per la classifica.")
         except Exception as e: st.error(f"Errore caricamento classifica: {e}")
 
-# ==========================================
-# 📂 TAB ARCHIVIO GPX
-# ==========================================
 with tabs[2]:
     st.subheader("📂 Il tuo Archivio GPX Personale")
     st.markdown("Gestisci, organizza ed esplora le tue tracce personali o inviale alla Mappa principale.")
@@ -946,7 +1003,6 @@ with tabs[2]:
                             st.session_state.tracce_gpx[nome_traccia]["descrizione"] = desc
                             salva_traccia_gpx(st.session_state.profilo_attivo, nome_traccia, desc, visibile, info["dati"], info.get("id"))
 
-                    # PROFILO ALTIMETRICO CON CHIAVE GRAFICO UNICA
                     if info["dati"].get("quote"):
                         fig_gpx = disegna_profilo_altimetrico(info["dati"]["quote"], info["dati"]["dist"], "Profilo Altimetrico")
                         if fig_gpx:
@@ -996,9 +1052,6 @@ with tabs[2]:
                             st.rerun()
     else: st.info("Nessuna traccia presente nell'archivio.")
 
-# ==========================================
-# 🌐 TAB COMMUNITY
-# ==========================================
 with tabs[3]:
     st.subheader("🌐 Feed Tracce della Community")
     st.markdown("Esplora gli itinerari condivisi pubblicamente dagli altri esploratori.")
@@ -1063,9 +1116,6 @@ with tabs[3]:
                     with ck2:
                         if kudos: st.caption(f"👏 Apprezzato da: {', '.join(kudos)}")
 
-# ==========================================
-# 🗺️ TAB MAPPA & ITINERARI
-# ==========================================
 with tabs[0]:
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
     mostra_sentieri = col_t1.toggle("🕸️ Rete Sentieristica", value=False, key="tg_sentieri")
@@ -1172,7 +1222,6 @@ with tabs[0]:
 
     map_data = st_folium(m, use_container_width=True, height=540, key="mappa_vda_core", returned_objects=["last_object_clicked_tooltip", "last_clicked"])
 
-    # Selettore Rapido 3D
     tracce_3d = {}
     if st.session_state.get("itinerario_attivo") and st.session_state.get("itinerario_metadati", {}).get("quote"):
         tracce_3d["📍 Itinerario Calcolato"] = (st.session_state.itinerario_attivo['geometry']['coordinates'], st.session_state.itinerario_metadati['quote'])
@@ -1221,7 +1270,6 @@ with tabs[0]:
                 idx_st = stati_disponibili.index(st_corr) if st_corr in stati_disponibili else 0
                 st.selectbox("Modifica stato cloud:", options=stati_disponibili, index=idx_st, key=f"quick_edit_{clk_t}", on_change=autosave_quick_edit_for, args=(clk_t,))
 
-            # RADAR STRUTTURE VETTORIALIZZATO AD ALTISSIMA VELOCITA'
             st.markdown("#### 🎯 Radar Esplorazione")
             if len(st.session_state.radar_coords) > 0:
                 p_rad = np.radians([lat_n, lon_n])
@@ -1253,7 +1301,6 @@ with tabs[0]:
             url_gul = f"https://www.gulliver.it/?s={n_cliccato.replace(' ', '+')}" if clk_t else "https://www.gulliver.it/itinerari/?paese=italia&regione=valle-daosta"
             st.link_button("🏔️ Cerca su Gulliver", url_gul, use_container_width=True)
 
-    # PIANIFICATORE ITINERARIO
     st.markdown("<br>", unsafe_allow_html=True)
     with st.container(border=True):
         st.subheader("🧭 Pianificatore Itinerario")
@@ -1322,9 +1369,6 @@ with tabs[0]:
                         st.success("Salvato nel tuo Archivio Cloud!")
                         st.rerun()
 
-# ==========================================
-# 📊 TAB REGISTRI
-# ==========================================
 with tabs[1]:
     st.subheader(f"Database interattivo di {st.session_state.profilo_attivo}")
     
